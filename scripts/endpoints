@@ -1,0 +1,13 @@
+The critical endpoint Match-V5
+
+Then endpoint
+ /lol/match/v5/matches/{matchId}
+gives a general and time-agnostic overview of the game, while 
+The /lol/match/v5/matches/{matchId}/timeline 
+endpoint gives frame-by-frame data of all of the game's statuses.  
+
+Endpoints that howtowin.lol might access include:
+
+Champion-V3/Champion-Rotation	For the 'try a new champion' feature
+
+
