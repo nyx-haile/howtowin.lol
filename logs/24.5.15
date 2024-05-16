@@ -16,3 +16,18 @@ An analogue of the distribution verification for derived statistics would be ext
 
 
 For any single-round computation we need to consider ways that adversaries can manipulate the data, and it may not be worth the computational overhead to avoid some polynomial operations on the server.
+
+After some examination, the first processing issue is converting the timeline into a tabulated entry. 
+Since we attempt to process data on each independent axis, we can potentially use a relational database to have each player-based timestamp instance point to each of its axes.
+
+However, converting to a tabulated entry is non-trivial. 
+
+Further steps:
+Team Derived variables
+	Weighted gold diff
+	
+
+
+Some ideal goals considering that position data is stored would be to show that certain positions are more likely to promote victory at certain times. For example, showing that junglers being in the bottom river at 5 minutes has a positve correlation with win rate is the kind of factual evidence that shows its import.
+
+Furthermore computing the correlation of all stats with winrate might reveal some interesting substat contributions.
