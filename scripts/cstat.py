@@ -25,6 +25,7 @@ def load(l: list) -> dict:
 def dump(d: dict) -> str:
 	return str(sort(d))
 
+
 all_stats = ['championStats', 'currentGold', 'damageStats', 'goldPerSecond', 'jungleMinionsKilled', 'level', 'minionsKilled', 'participantId', 'position', 'timeEnemySpentControlled', 'totalGold', 'xp']
 
 mvp_stats = ['currentGold', 'totalGold', 'xp']

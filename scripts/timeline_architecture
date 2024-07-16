@@ -12,9 +12,9 @@ info
 		participantId: puuid
 	frames
 		events
-			timestamp
+			timestaamp
 			realTimestamp
-			type
+			typea
 		participantFrames
 			participantID
 				champtionStats
