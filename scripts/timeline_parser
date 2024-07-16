@@ -1,12 +1,29 @@
 #!/usr/local/env python3
 
 import json
+import cstat
 
 #load json
 f = open('../games/NA1_5032579472.timeline',)
 game = json.load(f)
 
+#get matchId
+matchID = game['metadata']['matchId']
+
+
+#get assignment ID?
+
+participantID = {}
+for participantDto in game['info']['participants']:
+	participantID[participantDto['participantId']]=participantDto['puuid']
+
+
 #write db Files
+db = {}
+for dbStat in cstat.mvp_stats:
+	for playerID in participantID.keys():
+		db[dbStat] = open('../DB/'+matchID+'_'+participantID[int(playerID)]+'_'+dbStat, 'w')
+
 
 #tasks:
 #build out puuid database
@@ -36,23 +53,30 @@ game = json.load(f)
 
 #The most reliable way of determining the timestamp for the end of the match would be to add the max time played of any participant to the gameStartTimestamp. 
 
-#get assignment ID?
-
-participantID = {}
-for participantDto in game['info']['participants']:
-	participantID[participantDto['participantId']]=participantDto['puuid']
-
 #get all data for each player and load it into several vector series?
 
 for index, frame in enumerate(game['info']['frames']):	
 	#over all frames
+	#separate each stat into its own file
 	print(frame.keys())
 	pFrame = frame['participantFrames']
 	print(pFrame.keys())
 	for playerID in pFrame.keys():
-		print(pFrame[playerID])
-		print(pFrame[playerID].keys())
-		assert False
+		#print(pFrame[playerID].keys())
+		#print(pFrame[playerID])
+		'''for dbStat in pFrame[playerID].keys():
+			db[dbStat] = open('../DB/'+matchID+'_'+participantID[int(playerID)]+'_'+dbStat, 'w')
+			stat = pFrame[playerID][dbStat]
+			print(stat)
+			db[dbStat].write(cstat.dump(stat))
+		''' #Tabled for now to work on the MVP
+		#MVP stats: Total Gold, Current Gold, item vector
+		for dbStat in ['currentGold', 'totalGold', 'xp']:
+			stat = pFrame[playerID][dbStat]
+			print(stat)
+			with open('../DB/'+matchID+'_'+participantID[int(playerID)]+'_'+dbStat, 'a') as db[dbStat]:
+				db[dbStat].write(str(stat)+'\t')
+	assert index <= 100
 
 #MVP
 
