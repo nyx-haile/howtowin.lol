@@ -2,7 +2,10 @@
 
 import json
 import cstat
+from dragon import Dragon
 
+#load dragon oracle
+d = Dragon()
 
 #load json
 f = open('../games/NA1_5032579472.timeline',)
@@ -16,7 +19,6 @@ participantID = {}
 for participantDto in game['info']['participants']:
 	participantID[participantDto['participantId']]=participantDto['puuid']
 	#write PUUIDs to database	
-print(participantID)
 
 #write db Files
 db = {}
@@ -39,7 +41,7 @@ with open('../DB/'+matchID+'_'+'info', 'w') as match_row:
 def handle_event(event):
 	match event['type']:
 		case "ITEM_UNDO":
-			db[event['participantId']]['ITEMS'][event['timestamp']] = (event['afterId'], event['beforeId'])
+			db[event['participantId']]['ITEMS'][event['timestamp']] = (-event['beforeId'], event['afterId'])
 			db[event['participantId']]['ITEM_STATE'][event['beforeId']] -=1
 			db[event['participantId']]['ITEM_STATE'][event['afterId']] +=1
 			db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
@@ -67,6 +69,9 @@ def handle_event(event):
 			#dict_keys(['killType', 'killerId', 'position', 'timestamp', 'type']),
 			return None
 		case  'GAME_END':
+			with open(f'../DB/{matchID}_info', 'a') as match_row:
+				match_row.write(str(event['winningTeam'])+'\n')
+				match_row.write(str(event['realTimestamp']))
 			#(['gameId', 'realTimestamp', 'timestamp', 'type', 'winningTeam'])}
 			return None
 		case 'OBJECTIVE_BOUNTY_PRESTART':
@@ -76,7 +81,10 @@ def handle_event(event):
 			#dict_keys(['levelUpType', 'participantId', 'skillSlot', 'timestamp', 'type'])
 			return None
 		case 'ITEM_DESTROYED':
-			db[event['participantId']]['ITEMS'][event['timestamp']] = event['itemId']
+			db[event['participantId']]['ITEMS'][event['timestamp']] = -event['itemId']
+			db[event['participantId']]['ITEM_STATE'].setdefault(event['itemId'], 0)
+			db[event['participantId']]['ITEM_STATE'][event['itemId']] -=1
+			db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
 			#dict_keys(['itemId', 'participantId', 'timestamp', 'type'])
 			return None
 		case 'ITEM_PURCHASED':
@@ -90,6 +98,10 @@ def handle_event(event):
 			#dict_keys(['assistingParticipantIds', 'bounty', 'killStreakLength', 'killerId', 'position', 'shutdownBounty', 'timestamp', 'type', 'victimDamageDealt', 'victimDamageReceived', 'victimId'])
 			return None
 		case 'ITEM_SOLD':
+			db[event['participantId']]['ITEMS'][event['timestamp']] = -event['itemId']
+			db[event['participantId']]['ITEM_STATE'].setdefault(event['itemId'], 0)
+			db[event['participantId']]['ITEM_STATE'][event['itemId']] -=1
+			db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
 			#dict_keys(['itemId', 'participantId', 'timestamp', 'type']),
 			return None
 		case 'WARD_KILL':
@@ -122,4 +134,5 @@ for playerID in db.keys():
 		with open(f'../DB/{matchID}_{participantID[playerID]}_{dbStat}', 'w') as buf:
 			json.dump(db[playerID][dbStat], buf)
 
-print(db[1])
+print([f'{item}: {db[1]['ITEM_STATE'][item]}' for item in db[1]['ITEM_STATE'] if db[1]['ITEM_STATE'][item] > 0])
+print([db[1]['ITEMS'][item] for item in db[1]['ITEMS'].keys() if type(item) != str])
