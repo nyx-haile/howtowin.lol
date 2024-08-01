@@ -1,0 +1,26 @@
+Today task:
+
+build queues
+    game queue + game workers
+        exports to #GAMEID PARSED(BOOL) JSON(BIN) IMPORTED(BOOL)
+    player queue + player worker
+        exports to #PUUID(STRING) #RIOT_NAME(SET)  LAST_CHECK(INT TIMESTAMP) LAST_GAME(INT GAMEID) EMPTY_CHECKS(INT)
+
+pseudo:
+
+player agent
+    brlpoplpush(pqueue, ppq, 0)
+    fetch the players games from the queue
+    (may require a summoner check?)
+    update player stats in db
+    push the games to games queue
+    loop forever.
+
+game agent
+    bldsglkjdf(gq pgq 0)
+    fetch players from games
+    push players to players queue
+        update all stats for rows
+
+request queue
+

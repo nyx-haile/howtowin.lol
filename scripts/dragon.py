@@ -63,13 +63,22 @@ class Dragon:
 			json.dump(tree, f)
 
 		self.init_tree()
+
+	def build_sr_items(self):
+		self.SR = [item for item in d.item_dict['data'].keys() if d.get_item(item)['maps']['11'] == True]
+	
 	def item_update(self, item):
 		#fetch items from item dict
 		#recurse
-		
+		return None
 if __name__ == "__main__":
 	d = Dragon()
-	d.patch_update()
+	d.init_json()
+	print(d.get_item(228008))
+	print([item for item in d.item_dict['data'].keys() if d.get_item(item)['maps']['11'] == True])
+	d.build_sr_items()
+	print(d.SR.sort())
+	#d.patch_update()
 	#print(d.tree['6672'])
 	#print(d.get_item(6672))
 	#print(d.tree['1036'])

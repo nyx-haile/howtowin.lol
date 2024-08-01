@@ -1,0 +1,9 @@
+to-do
+
+set up timestamp bucketing (1s)
+
+set up array encoding
+
+push data to clickhaus
+
+reacquire Riot API key (apply for long term key)
