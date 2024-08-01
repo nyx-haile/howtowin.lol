@@ -2,7 +2,7 @@ import sqlite3
 import os
 
 
-db_path = '/home/gandalf/howtowin.lol/DB'
+db_path = '/home/alcaeus/howtowin.lol/DB'
 
 match_db = sqlite3.connect(db_path + '/match.db')
 match_cursor = match_db.cursor()

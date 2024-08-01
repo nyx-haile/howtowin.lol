@@ -1,5 +1,5 @@
 #Helper functions to fetch data from the Riot Games API
-
+import sqlite3
 import requests
 import json
 import dragon
@@ -52,7 +52,7 @@ def get_players_by_match(match_id, match_type="ranked"):
         handle_match(response.json())
     else:
     	return None
-
+"""
 def handle_match(match):
     #get the players
     players = match["info"]["participants"]
@@ -66,14 +66,15 @@ def handle_match(match):
 	        player_cursor.execute("INSERT INTO players (puuid) VALUES (?)", (player["puuid"],))
 	        player_db.commit()
 	        #get the matches of the player
-	        matches = get_matches_by_puuid(player["puuid"])
-	        if matches != None:
-		        for m in matches:
+            matches = get_matches_by_puuid(player["puuid"])
+            if matches != None:
+                for m in matches:
                     handle_match(m)
-	        else:
+            else:
 		        print("Failed to get matches for player " + player["puuid"])
         else:
 	        print("Player " + player["puuid"] + " is already in the database")
+"""
 
 #define ratelimit function which makes sure we don't exceed the rate limit of 100 requests per 2 minutes
 def ratelimit(func, *args):
