@@ -1,3 +1,5 @@
 secrets/*
 dragon/*
 scripts/test/secret/*
+lib/*
+bin/*
