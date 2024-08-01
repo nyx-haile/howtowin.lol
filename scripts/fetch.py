@@ -10,18 +10,16 @@ import time
 
 class agent(Redis):
     def __init__(self, *args, **kwargs):
-        self.connect()
-        super().__init__(self.uri)
-        #super().from_url("redis://localhost:6379/0")
+        super().__init__(*args, **kwargs)
         self.match_type = "ranked"
         with open("../secrets/api_key", "r") as file:
             self.api_key = file.read().strip()
-
-    def connect(self):
+    
+    @classmethod
+    def connect(cls):
         with open("../secrets/howl-fetch", "r") as file:
-            self.uri = file.read()
-            #self = self.from_url(dragonfly_uri)
-            return self
+            uri = file.read()
+        return cls.from_url(uri)
 
     def get(self, key, default=0):
         val = super().get(key)
@@ -105,12 +103,12 @@ class agent(Redis):
 
 
 if __name__ == "__main__":
-    redis_client = agent()
-    redis_client.connect()
+    redis_client = agent.connect()
     redis_client.lpush("players", "wiFvhmOQlgki5o5IfTifgk8wEYdpf0GE2Dw87vU-CGQjBNL6VwpibC8YUgpWVhq0ki0M-8P30J80UA")
     player = redis_client.rpop("players").decode("utf-8")
     redis_client.set("test", "hello world")
     print(redis_client.get("test"))
+    print(redis_client.get("tes3443t", 69))
     print(redis_client.keys())
     print(redis_client.get("interval_MATCHV5", 69))
     redis_client.handle_player(player)
