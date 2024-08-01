@@ -13,4 +13,6 @@ class Game(agent):
 class Match(dragon)):
     #match parser agent
 
+if __name__ == "__main__":
+    #main function
 

@@ -19,9 +19,8 @@ def redis_connect():
 
 #API key
 #fetch from secrets directory
-def api_key():
-    with open("../secrets/api_key.txt", "r") as file:
-        api_key = file.read()
+with open("../secrets/api_key.txt", "r") as file:
+    api_key = file.read()
 
 #define ratelimited request
 def request(url, headers):
@@ -31,7 +30,7 @@ def request(url, headers):
 def get_matches_by_puuid(puuid, start=0, count=100):
     url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start={start}&count={count}"
     headers = {
-	    "X-Riot-Token": api_key()
+	    "X-Riot-Token": api_key(),
         "type" : "ranked"
     }
     response = request(url, headers=headers)
@@ -44,13 +43,13 @@ def get_matches_by_puuid(puuid, start=0, count=100):
 def get_players_by_match(match_id, match_type="ranked"):
     url = f"https://americas.api.riotgames.com/lol/match/v5/matches/{match_id}"
     headers = {
-	    "X-Riot-Token": api_key
+	    "X-Riot-Token": api_key,
 	    "type" : match_type
     }
     response = request(url, headers=headers)
     if response.status_code == 200:
 	#parse the response
-	handle_match(response.json())
+        handle_match(response.json())
     else:
     	return None
 
@@ -61,7 +60,7 @@ def handle_match(match):
 	    #check if the player is already in the database
     	#convert to redis
         player_cursor.execute("SELECT * FROM players WHERE puuid=?", (player["puuid"],))
-	    if player_cursor.fetchone() == None:
+        if player_cursor.fetchone() == None:
 	        #add the player to the database and store the timestamp of their matches
             #may be used later for a prediction algorithm to make checking more efficient.
 	        player_cursor.execute("INSERT INTO players (puuid) VALUES (?)", (player["puuid"],))
@@ -70,7 +69,7 @@ def handle_match(match):
 	        matches = get_matches_by_puuid(player["puuid"])
 	        if matches != None:
 		        for m in matches:
-	    	        handle_match(m)
+                    handle_match(m)
 	        else:
 		        print("Failed to get matches for player " + player["puuid"])
         else:
@@ -98,10 +97,13 @@ def ratelimit(func, *args):
 if __name__ == "__main__":
     #set up working loop
     #get first player from player database
-    player_cursor.execute("SELECT * FROM players")
+    player_db = sqlite3.connect("players.db")
+    player_cursor = player_db.cursor()
+    player_cursor.execute("SELECT * FROM player_queue")
     player = player_cursor.fetchone()
     while player != None: #while there are still players in the database
         matches = get_matches_by_puuid(player[0])
         for match in matches:
             handle_match(match)
+        assert False
         #get the next player
