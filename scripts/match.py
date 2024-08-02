@@ -1,7 +1,7 @@
 #!/usr/local/env python3
 
 import json
-import cstat
+#import cstat
 from dragon import Dragon
 
 #load dragon oracle
@@ -134,5 +134,5 @@ for playerID in db.keys():
 		with open(f'../DB/{matchID}_{participantID[playerID]}_{dbStat}', 'w') as buf:
 			json.dump(db[playerID][dbStat], buf)
 
-print([f'{item}: {db[1]['ITEM_STATE'][item]}' for item in db[1]['ITEM_STATE'] if db[1]['ITEM_STATE'][item] > 0])
-print([db[1]['ITEMS'][item] for item in db[1]['ITEMS'].keys() if type(item) != str])
+#print([f'{item}: {db[1]['ITEM_STATE'][item]}' for item in db[1]['ITEM_STATE'] if db[1]['ITEM_STATE'][item] > 0])
+#print([db[1]['ITEMS'][item] for item in db[1]['ITEMS'].keys() if type(item) != str])
