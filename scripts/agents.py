@@ -13,7 +13,6 @@ def player_scraper(x):
     player = agent.connect()
     while player.get_player():
         player.handle_player()
-    player.set(f"scraper_{x}", "done")
 
 def match_parser(x):
     #start match scraper
@@ -26,11 +25,11 @@ if __name__ == "__main__":
     db = agent.connect()
     threads = {'player': {}, 'match': {}}
     for i in range(int(sys.argv[1])):
-        #threads['player'][i] = _thread.start_new_thread(player_scraper, (i,))
+        threads['player'][i] = _thread.start_new_thread(player_scraper, (i,))
         threads['match'][i] = _thread.start_new_thread(match_parser, (i,))
-    while db.get("scraper_0") != "done": 
-        time.sleep(2)
-    print(db.get("scraper_0"))
-
+    print(threads)
+    while True:
+        time.sleep(0.5)
+        print(db.get("log"))
 
 

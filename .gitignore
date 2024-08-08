@@ -4,3 +4,4 @@ scripts/test/secret/*
 lib/*
 bin/*
 matches/*
+players/*

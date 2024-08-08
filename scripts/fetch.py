@@ -31,31 +31,54 @@ class agent(Redis):
         return super().brpop(key, timeout=timeout)[1]
 
     def handle_match(self):
+        if self.match == None:
+            self.get_match()
         match = self.get_match_by_id(self.match)
-        participants = [match['info']['participants'][i]['puuid'] for i in range(10)]
+        participants = [i['puuid'] for i in match['info']['participants']]
         #get the players in the match
-        self.sadd(f"players_{self.match}", *participants)
         #incr all the players in the match
         #this ups their priority in the check queue
         self.zincrby("player_queue", 1, *participants)
-        self.zincrby("players", 1, *participants)
-        
-        self.lpush("match_import", self.match)
+        #save the data to a file
         json.dump(match, open(f"../matches/{self.match}.json", "w"))
+        #remove the match from the processing queue
         self.srem("match_processing", self.match)
-        self.sadd("match_processed", self.match)
+        self.sadd("match_handled", self.match)
+        self.zincrby("matches", 1, self.match)
 
+    def log(self, message):
+        self.set("log", message)
     def get_player(self):
-        self.player = self.brpop("players").decode("utf-8")
+        self.log("Getting player")
+        self.player = self.bzpopmax("player_queue")[1].decode("utf-8")
+        self.log(f"Got player {self.player}")
         self.sadd("player_processing", self.player)
         return self.player
 
+    def zincrby(self, key, increment, *args):
+        for arg in args:
+            super().zincrby(key, increment, arg)
+
     def handle_player(self):
-        self.lpush("matches", *self.get_matches_by_puuid(self.player))
+        if self.player == None:
+            self.get_player()
+        matches = self.get_matches_by_puuid(self.player)
+        self.set("log", f"Player {self.player} has {len(matches)} matches")
+        player_data = self.get_account_by_puuid(self.player)
+        self.set("log", f"Player {self.player} is {player_data}")
+        #incr all the matches not already handled
+        self.set("log", "dumping matches")
+        self.sadd(f"player_matches_{self.player}", *matches)
+        new_matches = self.sdiff(f"player_matches_{self.player}", "match_handled", "match_processing")
+        nmc = self.scard(f"player_matches_{self.player}")
+        self.zincrby("match_queue", 1, *new_matches)
         self.srem("player_processing", self.player)
+        self.sadd("player_handled", self.player)
+        self.zincrby("players", nmc, self.player)
+
 
     def get_match(self):
-        self.match = self.brpop("matches").decode("utf-8")
+        self.match = self.bzpopmax("match_queue")[1].decode("utf-8")
         self.sadd("match_processing", self.match)
         return self.match
 
@@ -93,7 +116,7 @@ class agent(Redis):
         if response.status_code == 200:
 	        return response.json()
         else:
-            assert False, (response)
+            assert False, (response, response.json())
             return None
     
     def get_match_by_id(self, match_id):
@@ -120,25 +143,31 @@ class agent(Redis):
         else:
             return None
 
-    #check the other players in each game
-    def get_players_by_match(match_id):
-        endpoint = "MATCHV5"
-        url = f"https://americas.api.riotgames.com/lol/match/v5/matches/{match_id}"
+    def get_account_by_puuid(self, puuid):
+        endpoint = "ACCOUNTV1"
+        url = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-puuid/{puuid}"
         headers = {
-            "X-Riot-Token": api_key
+            "X-Riot-Token": self.api_key,
         }
         response = self.request(url, headers=headers, endpoint=endpoint)
         if response.status_code == 200:
-        #parse the response
-            return json.loads(response.json())['info']['participants']
+            return response.json()
         else:
-            assert False
-            return None
+           assert False, (response, response.json())
+           return response
 
+
+    def get_account_by_riot_id(self, gameName, tagLine):
+        endpoint = "ACCOUNTV1"
+        url = f"https://americas.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine}"
+        headers = {
+            "X-Riot-Token": self.api_key,
+        }
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
 
 if __name__ == "__main__":
     redis_client = agent.connect()
-    for k in redis_client.keys("sec*"):
-        redis_client.delete(k)
-    redis_client.lpush("players", "wiFvhmOQlgki5o5IfTifgk8wEYdpf0GE2Dw87vU-CGQjBNL6VwpibC8YUgpWVhq0ki0M-8P30J80UA")
-    redis_client.delete("cmax_/lol/summoner/v4/summoners/by-account/{encryptedAccountId}")
