@@ -10,8 +10,11 @@ import time
 
 class agent(Redis):
     def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
         super().__init__(*args, **kwargs)
-        self.match_type = "ranked"
+        self.id = self.kwargs.get("id", "0")
+        self.queue = 420
+        self.match_type = self.kwargs.get("match_type", "ranked")
         with open("../secrets/api_key", "r") as file:
             self.api_key = file.read().strip()
         self.ratelimitcounter = 0   
@@ -47,7 +50,8 @@ class agent(Redis):
         self.zincrby("matches", 1, self.match)
 
     def log(self, message):
-        self.set("log", message)
+        self.set("log", f"{message}\t {self.id}")
+
     def get_player(self):
         self.log("Getting player")
         self.player = self.bzpopmax("player_queue")[1].decode("utf-8")
@@ -110,7 +114,7 @@ class agent(Redis):
         url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start={start}&count={count}"
         headers = {
 	        "X-Riot-Token": self.api_key,
-            "type" : self.match_type
+            "queue": self.queue,
         }
         response = self.request(url, headers=headers, endpoint=endpoint)
         if response.status_code == 200:
@@ -131,16 +135,18 @@ class agent(Redis):
         else:
             assert False, (response)
             return None
+
     def get_timeline_by_match(self, match_id):
         endpoint = "MATCHV5"
         url = f"https://americas.api.riotgames.com/lol/match/v5/matches/{match_id}/timeline"
         headers = {
-            "X-Riot-Token": api_key,
+            "X-Riot-Token": self.api_key,
         }
         response = self.request(url, headers=headers, endpoint=endpoint)
         if response.status_code == 200:
             return response.json()
         else:
+            assert False, (response, '\n', response.json())
             return None
 
     def get_account_by_puuid(self, puuid):
@@ -169,5 +175,4 @@ class agent(Redis):
         else:
             return None
 
-if __name__ == "__main__":
-    redis_client = agent.connect()
+#if __name__ == "__main__":

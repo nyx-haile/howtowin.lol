@@ -1,0 +1,58 @@
+timestamp(array)
+	player(array)
+	|	stat(array)
+	|	item(array)
+	-> & team(array) (same level)
+		stat(array)
+		objective(array)
+
+statlist/eventlist?
+
+stats
+--Line 13 = 0
+0	gold (totalGold)
+1	level	
+2	positionX
+3	positionY
+4	currentGold
+5	xp
+6	minionsKilled
+7	jungleMinionsKilled
+8	goldPerSecond
+9	abilityhaste
+10	abilitypower
+11	armor
+12	armorPen
+13	armorPenPercent	int	
+	attackDamage	int	
+	attackSpeed	int	
+	bonusArmorPenPercent	int	
+	bonusMagicPenPercent	int	
+	ccReduction	int	
+	cooldownReduction	int	
+	health	int	
+	healthMax	int	
+	healthRegen	int	
+	lifesteal	int	
+	magicPen	int	
+	magicPenPercent	int	
+	magicResist	int	
+	movementSpeed	int	
+	omnivamp	int	
+	physicalVamp	int	
+	power	int	
+	powerMax	int	
+	powerRegen	int	
+	spellVamp	int
+	magicDamageDone	int	
+	magicDamageDoneToChampions	int	
+	magicDamageTaken	int	
+	physicalDamageDone	int	
+	physicalDamageDoneToChampions	int	
+	physicalDamageTaken	int	
+	totalDamageDone	int	
+	totalDamageDoneToChampions	int	
+	totalDamageTaken	int	
+	trueDamageDone	int	
+	trueDamageDoneToChampions	int	
+	trueDamageTaken	int
