@@ -56,7 +56,7 @@ class parser(agent):
         self.dragon = Dragon()
         with open("../secrets/clickhouse", "r") as f:
             self.clickhouse_key = f.read().strip()
-        self.client = Client(user="howl", password=f"{self.clickhouse_key}", host="howtowin-lol-presales-test.c.aivencloud.com", port=21168, secure=True)
+        self.client = Client(user="avnadmin", password=f"{self.clickhouse_key}", host="howtowin-lol-presales-test.c.aivencloud.com", port=21168, secure=True)
 
     #def get_match(self):
         #self.match = "NA1_5007766029"
@@ -78,13 +78,21 @@ class parser(agent):
             self.handle_events(frame['events'])
         self.client.execute(f"INSERT INTO test_matches {self.match_SL}")
     def handle_pframe(self, pframe):
+        self.client.execute('USE default')
         parray = []
         for player in pframe:
             nframe = flatten(pframe[player])
             nkeys = list(nframe.keys())
             nkeys.sort()
-            parray.append([nframe[key] for key in nkeys])
-        self.match_SL[self.timestamp] = parray
+            #lv_test = [nframe[key] for key in nkeys]
+            #print(lv_test, player)
+            parray.append([float(nframe[key]) for key in nkeys])
+        self.client.execute(
+                'INSERT INTO default.lv_test VALUES ',
+                [{'player_id': 1, 'mpid': '19312903', 'match_id': 'testt0', 'match_vector': parray[0]}]#, {'player_id': 2}, {'player_id': 3}, {'player_id': 100}]
+                )
+        #self.client.insert('lv_test', parray, column_names=['match_id', 'player_id', 'match_vector'])
+        #self.match_SL[self.timestamp] = parray
         print(self.timestamp)
         print(len(self.match_SL))
         self.match_SL[10] = "test"
