@@ -1,0 +1,5 @@
+still working on getting things together with the app framework, learning svelte because I didn't really have a strong app background before and it seems very popular with its userbase and is fast. Currently trying to set up a skeleton site so that I can link API things together and have a project that can serve at least some requests before the summer ends. Fingers crossed :P
+
+Biggest issues with svelte have been figuring out the pages (it wasn't really that hard, just a bit confusing initially), trying to properly keep style, and currently trying to make the sidebar using {#each} while not really understanding what it's meant to do. (Will figure it out, trying to implement flexboxes first)
+
+Everything is a bit different than react, and I think I could have easily done significant parts of this much quicker in react, but the serverside computation (and its simplicity) are a huge advantage here, so I want to work with this and learn it.
