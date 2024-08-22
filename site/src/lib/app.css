@@ -1,0 +1,10 @@
+body {
+  background-color: #121212;
+  color: #fff;
+}
+
+.page {
+  display: flex;
+  float: left;
+  padding: 100px;
+}
