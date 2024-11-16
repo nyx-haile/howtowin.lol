@@ -1,0 +1,61 @@
+
+import json
+
+#load json
+f = open('../games/NA1_5032579472',)
+game = json.load(f)
+
+#tasks:
+#build out puuid database
+
+#build gamedata rows
+#build game row
+# version, matchID, endOfGameResult, GameCreation, GameDuration, TrueGameEnd, gameID, gameMode, GameStartTimestamp, gameVersion, teams
+
+
+#Should the game data be just included as a list of rows--no each datastream should be seperate.
+
+#PlayerRow
+#EOG statistics such as PingsCount, Assists, BaronKills and all other data in ParticipantDto. Indicate kayn transformation as null/0/1?
+#ignore challenges, eligibleForProgression, doubleKills, 
+
+#PingsRow
+
+
+#ChampDataTable
+#includes 
+
+#ItemTable
+
+#GoldTable
+
+#
+
+#The most reliable way of determining the timestamp for the end of the match would be to add the max time played of any participant to the gameStartTimestamp. 
+
+
+print(game.keys())
+print(game['info'].keys())
+
+
+#MVP
+
+#gold-normalised item WR
+	#MVPMVP
+	#1st item gold-normalised champ wr
+	#(first full item)
+	#build item wide-database
+	#set codes?
+	#statistical embedding?
+	#items themselves are not important compared to stats?
+	#possession of unique stats is independent of items...
+	#question is, is it reversible? 
+	#theoretically yes??? 
+	#just store item vector
+	#get item code for each?
+
+#champ-normalised item WR
+	#exists generally
+#rune-normalised item WR
+
+
