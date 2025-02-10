@@ -1,9 +1,5 @@
 what is howtowin.lol?
 
-2 things. 
-
-An experiment in distributed/collaborative computing
-
 A lol stat tracker that gives you more useful information than 'build this item'
 
 LOL is a situational game. Counters exist, and the game doesn't always go perfectly from level 1. Building blade of the ruined king into thornmail is kinda trolling, but our stat trackers don't reflect this. howtowin.lol rectifies this by normalising all stats over various diffs, (potentially) including gold, team gold, level, team level, experience, and others. 
@@ -32,7 +28,4 @@ the stats are not super complicated.
 All normalisation is done by rescaling everything to have mean 0 and range +/- 1. 
 Dimensionality reduction (for the purposes of identifying weakpoints) is done by (decide algorithm)
 
-The distributed computing, on the other hand, is somewhat difficult.
-I'll be packaging a C++ binary which retrieves the patch data from the official site, then unpacks it and verifies it to the server.
-each futher computation step must also be verified, and I'll see how I'm going to do that later.
 More research to be done in that area.
