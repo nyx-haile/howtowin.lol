@@ -5,3 +5,4 @@ lib/*
 bin/*
 matches/*
 players/*
+.worktrees/
