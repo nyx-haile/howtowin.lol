@@ -1,244 +1,183 @@
 #!/usr/local/env python3
 from fetch import agent
 import json
-#import cstat
 from dragon import Dragon
-import requests
-from clickhouse_driver import Client
-from collections.abc import MutableMapping
-
-def flatten(dictionary, parent_key='', separator='_'):
-    items = []
-    for key, value in dictionary.items():
-        new_key = parent_key + separator + key if parent_key else key
-        if isinstance(value, MutableMapping):
-            items.extend(flatten(value, new_key, separator=separator).items())
-        else:
-            items.append((new_key, value))
-    return dict(items)
-
-class sparse_list(list):
-    def __init__(self, *args, **kwargs):
-        self.vals = kwargs
-        self.empty = None
-        self.maxindex = -1
-    def __getitem__(self, index):
-        if index < self.maxindex:
-            return self.vals.get(index, self.empty)
-        else:
-            raise IndexError
-    def __setitem__(self, index, value):
-        self.vals[index] = value
-        if index > self.maxindex:
-            self.maxindex = index
-    def __delitem__(self, index):
-        self.vals.pop(index)
-        if index == self.maxindex:
-            self.maxindex = max(self.vals.keys())
-    def __str__(self):
-        buf = []
-        for key in self.vals:
-            if len(buf) == key:
-                buf.append(self.vals[key])
-            else:
-                buf.extend([self.empty] * (key - len(buf)))
-                buf.append(self.vals[key])
-        for key in self.vals:
-            assert buf[key] == self.vals[key], "You fucked up somehow..."
-        return str(buf)
-    def __len__(self):
-        return self.maxindex +1
+import db
 
 
 class parser(agent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dragon = Dragon()
-        with open("../secrets/clickhouse", "r") as f:
-            self.clickhouse_key = f.read().strip()
-        self.client = Client(user="avnadmin", password=f"{self.clickhouse_key}", host="howtowin-lol-presales-test.c.aivencloud.com", port=21168, secure=True)
 
-    #def get_match(self):
-        #self.match = "NA1_5007766029"
-        #super.get_match() 
-        #return self.match
-        #idk if this will work actually...
-        #maybe i should rank the matches by elo?
-        #or maybe i should just get the most recent match?
-        #lol ai 
-        #i think i should just get the most recent match
-        #ok.
     def handle_match(self):
+        if db.game_exists(self.match):
+            self.log(f"Match {self.match} already processed, skipping")
+            return
+
         self.match_data = self.get_match_by_id(self.match)
         self.match_timeline = self.get_timeline_by_match(self.match)
-        self.match_SL= sparse_list()
+
+        info = self.match_data['info']
+        participants = info['participants']
+
+        # Initialize per-participant state
+        self.db = {}
+        self.puuids = {}
+        self.team_ids = {}
+        self.roles = {}
+        self.winning_team = None
+
+        for p in participants:
+            slot = p['participantId']
+            self.db[slot] = {
+                'kills': 0,
+                'deaths': 0,
+                'assists': 0,
+                'wards_placed': 0,
+                'ward_kills': 0,
+                'ITEM_STATE': {},
+            }
+            self.puuids[slot] = p['puuid']
+            self.team_ids[slot] = p['teamId']
+            self.roles[slot] = p.get('teamPosition', 'UNKNOWN')
+
+        # Process frames — events first so cumulative stats are updated before pframe row is written
+        frame_rows = []
         for frame in self.match_timeline['info']['frames']:
-            self.timestamp = frame['timestamp']
-            self.handle_pframe(frame['participantFrames'])
+            timestamp_ms = frame['timestamp']
             self.handle_events(frame['events'])
-        self.client.execute(f"INSERT INTO test_matches {self.match_SL}")
-    def handle_pframe(self, pframe):
-        self.client.execute('USE default')
-        parray = []
-        for player in pframe:
-            nframe = flatten(pframe[player])
-            nkeys = list(nframe.keys())
-            nkeys.sort()
-            #lv_test = [nframe[key] for key in nkeys]
-            #print(lv_test, player)
-            parray.append([float(nframe[key]) for key in nkeys])
-        self.client.execute(
-                'INSERT INTO default.lv_test VALUES ',
-                [{'player_id': 1, 'mpid': '19312903', 'match_id': 'testt0', 'match_vector': parray[0]}]#, {'player_id': 2}, {'player_id': 3}, {'player_id': 100}]
-                )
-        #self.client.insert('lv_test', parray, column_names=['match_id', 'player_id', 'match_vector'])
-        #self.match_SL[self.timestamp] = parray
-        print(self.timestamp)
-        print(len(self.match_SL))
-        self.match_SL[10] = "test"
-        print(f"{self.match_SL}")
-        assert False
+            frame_rows.extend(self.handle_pframe(frame['participantFrames'], timestamp_ms))
+
+        # Derive patch string (e.g. "14.3" from "14.3.445.7843")
+        version_parts = info.get('gameVersion', '').split('.')
+        patch = '.'.join(version_parts[:2]) if len(version_parts) >= 2 else info.get('gameVersion', '')
+
+        db.insert_game(
+            match_id=self.match,
+            patch=patch,
+            queue_id=info.get('queueId', 0),
+            game_duration_s=info.get('gameDuration', 0),
+            winning_team=self.winning_team or 0,
+            created_at=info.get('gameCreation', 0) // 1000,
+        )
+        db.insert_frames(frame_rows)
+        db.insert_players([
+            {'puuid': self.puuids[slot]}
+            for slot in self.puuids
+        ])
+
+        self.log(f"Stored match {self.match}: {len(frame_rows)} frame rows")
+
+    def handle_pframe(self, pframe, timestamp_ms):
+        rows = []
+        for player_key, pdata in pframe.items():
+            slot = int(player_key)
+            player_db = self.db[slot]
+
+            cs = pdata.get('minionsKilled', 0) + pdata.get('jungleMinionsKilled', 0)
+            pos = pdata.get('position', {})
+            vision_score = player_db['wards_placed'] + player_db['ward_kills']
+
+            # Serialize active items (item_id -> count > 0) as a JSON array, up to 7 slots
+            items = []
+            for item_id, count in player_db['ITEM_STATE'].items():
+                if item_id > 0 and count > 0:
+                    items.extend([item_id] * count)
+            item_ids = json.dumps(items[:7])
+
+            rows.append({
+                'match_id': self.match,
+                'participant_slot': slot,
+                'puuid': self.puuids[slot],
+                'team_id': self.team_ids[slot],
+                'role': self.roles[slot],
+                'timestamp_ms': timestamp_ms,
+                'current_gold': pdata.get('currentGold', 0),
+                'total_gold': pdata.get('totalGold', 0),
+                'xp': pdata.get('xp', 0),
+                'level': pdata.get('level', 0),
+                'cs': cs,
+                'pos_x': pos.get('x', 0),
+                'pos_y': pos.get('y', 0),
+                'kills': player_db['kills'],
+                'deaths': player_db['deaths'],
+                'assists': player_db['assists'],
+                'vision_score': vision_score,
+                'item_ids': item_ids,
+            })
+        return rows
+
     def handle_events(self, events):
         for event in events:
             self.handle_event(event)
-        
-    def arrayify(self, some_dict):
-        pass
 
     def handle_event(self, event):
-        pass
-    def mangle_event(self, event):
         match event['type']:
-            case "ITEM_UNDO":
-                db[event['participantId']]['ITEMS'][event['timestamp']] = (-event['beforeId'], event['afterId'])
-                db[event['participantId']]['ITEM_STATE'][event['beforeId']] -=1
-                db[event['participantId']]['ITEM_STATE'][event['afterId']] +=1
-                db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
-                
-                #db[event['participantId']]['GOLD']['timestamp'] =  #update gold totals
-                #dict_keys(['afterId', 'beforeId', 'goldGain', 'participantId', 'timestamp', 'type'])
-                return None
-            case 'BUILDING_KILL':
-                #update gold totals
-                #dict_keys(['assistingParticipantIds', 'bounty', 'buildingType', 'killerId', 'laneType', 'position', 'teamId', 'timestamp', 'towerType', 'type']),
-                return None
-            case  'WARD_PLACED':
-                #WARD_PLACED': dict_keys(['creatorId', 'timestamp', 'type', 'wardType']),
-                return None
-            case  'TURRET_PLATE_DESTROYED':
-                #dict_keys(['killerId', 'laneType', 'position', 'teamId', 'timestamp', 'type']),
-                return None
-            case  'PAUSE_END':
-                #pass
-                return None
-            case 'LEVEL_UP':
-                #dict_keys(['level', 'participantId', 'timestamp', 'type'])
-                return None
-            case 'CHAMPION_SPECIAL_KILL':
-                #dict_keys(['killType', 'killerId', 'position', 'timestamp', 'type']),
-                return None
-            case  'GAME_END':
-                with open(f'../DB/{matchID}_info', 'a') as match_row:
-                    match_row.write(str(event['winningTeam'])+'\n')
-                    match_row.write(str(event['realTimestamp']))
-                #(['gameId', 'realTimestamp', 'timestamp', 'type', 'winningTeam'])}
-                return None
-            case 'OBJECTIVE_BOUNTY_PRESTART':
-                #dict_keys(['actualStartTime', 'teamId', 'timestamp', 'type']),
-                return None
-            case  'SKILL_LEVEL_UP':
-                #dict_keys(['levelUpType', 'participantId', 'skillSlot', 'timestamp', 'type'])
-                return None
-            case 'ITEM_DESTROYED':
-                db[event['participantId']]['ITEMS'][event['timestamp']] = -event['itemId']
-                db[event['participantId']]['ITEM_STATE'].setdefault(event['itemId'], 0)
-                db[event['participantId']]['ITEM_STATE'][event['itemId']] -=1
-                db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
-                #dict_keys(['itemId', 'participantId', 'timestamp', 'type'])
-                return None
-            case 'ITEM_PURCHASED':
-                db[event['participantId']]['ITEMS'][event['timestamp']] = event['itemId']
-                db[event['participantId']]['ITEM_STATE'].setdefault(event['itemId'], 0)
-                db[event['participantId']]['ITEM_STATE'][event['itemId']] +=1
-                db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
-                #'itemId', 'participantId', 'timestamp', 'type'
-                return None
             case 'CHAMPION_KILL':
-                #dict_keys(['assistingParticipantIds', 'bounty', 'killStreakLength', 'killerId', 'position', 'shutdownBounty', 'timestamp', 'type', 'victimDamageDealt', 'victimDamageReceived', 'victimId'])
+                killer_id = event.get('killerId', 0)
+                victim_id = event.get('victimId', 0)
+                assisters = event.get('assistingParticipantIds', [])
+                if killer_id > 0:
+                    self.db[killer_id]['kills'] += 1
+                if victim_id > 0:
+                    self.db[victim_id]['deaths'] += 1
+                for a in assisters:
+                    self.db[a]['assists'] += 1
                 return None
-            case 'ITEM_SOLD':
-                db[event['participantId']]['ITEMS'][event['timestamp']] = -event['itemId']
-                db[event['participantId']]['ITEM_STATE'].setdefault(event['itemId'], 0)
-                db[event['participantId']]['ITEM_STATE'][event['itemId']] -=1
-                db[event['participantId']]['ITEMS']['SET'+str(event['timestamp'])] = json.dumps(db[event['participantId']]['ITEM_STATE'])
-                #dict_keys(['itemId', 'participantId', 'timestamp', 'type']),
+            case 'WARD_PLACED':
+                creator_id = event.get('creatorId', 0)
+                if creator_id > 0:
+                    self.db[creator_id]['wards_placed'] += 1
                 return None
             case 'WARD_KILL':
-                #dict_keys(['killerId', 'timestamp', 'type', 'wardType'])
+                killer_id = event.get('killerId', 0)
+                if killer_id > 0:
+                    self.db[killer_id]['ward_kills'] += 1
                 return None
-            case 'ELITE_MONSTER_KILL':
-                #dict_keys(['bounty', 'killerId', 'killerTeamId', 'monsterSubType', 'monsterType', 'position', 'timestamp', 'type']),
+            case 'ITEM_PURCHASED':
+                pid = event.get('participantId', 0)
+                if pid > 0:
+                    item_id = event['itemId']
+                    self.db[pid]['ITEM_STATE'][item_id] = self.db[pid]['ITEM_STATE'].get(item_id, 0) + 1
                 return None
-        assert False, "Unknown Event Type"
-    itemtypes={}
-
-
+            case 'ITEM_SOLD' | 'ITEM_DESTROYED':
+                pid = event.get('participantId', 0)
+                if pid > 0:
+                    item_id = event['itemId']
+                    count = self.db[pid]['ITEM_STATE'].get(item_id, 0)
+                    if count > 1:
+                        self.db[pid]['ITEM_STATE'][item_id] = count - 1
+                    elif count == 1:
+                        del self.db[pid]['ITEM_STATE'][item_id]
+                return None
+            case 'ITEM_UNDO':
+                pid = event.get('participantId', 0)
+                if pid > 0:
+                    before_id = event.get('beforeId', 0)
+                    after_id = event.get('afterId', 0)
+                    if before_id > 0:
+                        count = self.db[pid]['ITEM_STATE'].get(before_id, 0)
+                        if count > 1:
+                            self.db[pid]['ITEM_STATE'][before_id] = count - 1
+                        elif count == 1:
+                            del self.db[pid]['ITEM_STATE'][before_id]
+                    if after_id > 0:
+                        self.db[pid]['ITEM_STATE'][after_id] = self.db[pid]['ITEM_STATE'].get(after_id, 0) + 1
+                return None
+            case 'GAME_END':
+                self.winning_team = event.get('winningTeam', 0)
+                return None
+            case 'BUILDING_KILL' | 'TURRET_PLATE_DESTROYED' | 'ELITE_MONSTER_KILL':
+                return None
+            case 'PAUSE_END' | 'LEVEL_UP' | 'SKILL_LEVEL_UP' | 'CHAMPION_SPECIAL_KILL':
+                return None
+            case 'OBJECTIVE_BOUNTY_PRESTART' | 'OBJECTIVE_BOUNTY_FINISH':
+                return None
+        self.log(f"Unknown event: {event['type']}")
 
 
 if __name__ == "__main__":
     match = parser.connect()
     match.match = "NA1_5081314144"
     match.handle_match()
-
-
-#    #get matchId
-#    matchID = game['metadata']['matchId']
-#
-#    #get ID assignments
-#    participantID = {}
-#    for participantDto in game['info']['participants']:
-#        participantID[participantDto['participantId']]=participantDto['puuid']
-#        #write PUUIDs to database	
-#
-#    #write db Files
-#    db = {}
-#    for playerID in participantID.keys():
-#        db[playerID] = {}
-#        db[playerID]['ITEMS'] = {0: 0}
-#        db[playerID]['ITEM_STATE']={0: 0}
-#        #db[playerID]['DAMAGE'] = {}
-#        #db[playerID]['WARDS'] = {}
-#        #db[playerID]['BOUNTY'] = {}
-#        #db[playerID]['OBJECTIVES'] = {}
-#        #for dbStat in cstat.mvp_stats:
-#            #db[playerID][dbStat] = {}
-#    #build game row
-#    with open('../DB/'+matchID+'_'+'info', 'w') as match_row:
-#        match_row.write(json.dumps(game['metadata']['matchId'])+'\n')
-#        match_row.write(json.dumps(game['info']['endOfGameResult'])+'\n')
-#        match_row.write(json.dumps(participantID)+'\n')
-#
-#    def test():   #build timeline rows
-#        for index, frame in enumerate(game['info']['frames']):	
-#            pass
-#            #get events
-#        for event in frame['events']:
-#            #log event
-#            #print(event.keys())
-#            #print(event['type'])
-#            handle_event(event)
-#        #for player in #frame['participantFrames']:
-#            #player_frame = frame['participantFrames'][player]
-#            #print(player_frame)
-#            #for dbStat in ['currentGold', 'totalGold', 'xp']:
-#                #stat = player_frame[dbStat]
-#                #print(str(stat))
-#                #db[int(player)][dbStat][frame['timestamp']] = stat		
-#
-#    for playerID in db.keys():
-#        for dbStat in db[playerID].keys():
-#            with open(f'../DB/{matchID}_{participantID[playerID]}_{dbStat}', 'w') as buf:
-#                json.dump(db[playerID][dbStat], buf)
-#
-#    #print([f'{item}: {db[1]['ITEM_STATE'][item]}' for item in db[1]['ITEM_STATE'] if db[1]['ITEM_STATE'][item] > 0])
-#    #print([db[1]['ITEMS'][item] for item in db[1]['ITEMS'].keys() if type(item) != str])
