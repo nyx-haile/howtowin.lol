@@ -63,10 +63,12 @@ class agent(Redis):
         for arg in args:
             super().zincrby(key, increment, arg)
 
-    def handle_player(self):
+    def handle_player(self, match_count=None):
         if self.player == None:
             self.get_player()
-        matches = self.get_matches_by_puuid(self.player)
+        if match_count is None:
+            match_count = int(self.kwargs.get('match_count', 10))
+        matches = self.get_matches_by_puuid(self.player, count=match_count)
         self.set("log", f"Player {self.player} has {len(matches)} matches")
         player_data = self.get_account_by_puuid(self.player)
         self.set("log", f"Player {self.player} is {player_data}")
@@ -111,10 +113,9 @@ class agent(Redis):
     #Get the matches of a player by PUUID
     def get_matches_by_puuid(self, puuid, start=0, count=100):
         endpoint = "MATCHV5"
-        url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start={start}&count={count}"
+        url = f"https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?start={start}&count={count}&queue={self.queue}"
         headers = {
-	        "X-Riot-Token": self.api_key,
-            "queue": self.queue,
+            "X-Riot-Token": self.api_key,
         }
         response = self.request(url, headers=headers, endpoint=endpoint)
         if response.status_code == 200:

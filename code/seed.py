@@ -66,4 +66,4 @@ if __name__ == "__main__":
         name, tag = sys.argv[1].split('#', 1)
         seed_single(name, tag)
     else:
-        seed_single("chaos", "kotic")
+        seed_single("chaos", "oda")

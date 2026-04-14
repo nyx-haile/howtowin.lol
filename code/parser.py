@@ -1,6 +1,7 @@
 import json
 from fetch import agent
 from db import get_conn, init_db, insert_game, insert_frame, insert_player, insert_event
+from raw_db import get_raw_conn, init_raw_db, insert_raw_match
 
 ROLE_MAP = {
     'TOP': 'TOP', 'JUNGLE': 'JGL', 'MIDDLE': 'MID',
@@ -12,13 +13,19 @@ class parser(agent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         init_db()
+        init_raw_db()
 
-    def handle_match(self):
-        self.match_data = self.get_match_by_id(self.match)
-        self.match_timeline = self.get_timeline_by_match(self.match)
+    def handle_match(self, match_data=None, match_timeline=None):
+        self.match_data = match_data if match_data is not None else self.get_match_by_id(self.match)
+        self.match_timeline = match_timeline if match_timeline is not None else self.get_timeline_by_match(self.match)
 
         match_id = self.match_data['metadata']['matchId']
         info = self.match_data['info']
+
+        raw_conn = get_raw_conn()
+        insert_raw_match(raw_conn, match_id, self.match_data, self.match_timeline)
+        raw_conn.commit()
+        raw_conn.close()
 
         # Build participant mapping
         self.participants = {}
