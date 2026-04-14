@@ -175,4 +175,31 @@ class agent(Redis):
         else:
             return None
 
+    def get_challenger_league(self, queue='RANKED_SOLO_5x5', region='na1'):
+        endpoint = "LEAGUEV4"
+        url = f"https://{region}.api.riotgames.com/lol/league/v4/challengerleagues/by-queue/{queue}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+    def get_grandmaster_league(self, queue='RANKED_SOLO_5x5', region='na1'):
+        endpoint = "LEAGUEV4"
+        url = f"https://{region}.api.riotgames.com/lol/league/v4/grandmasterleagues/by-queue/{queue}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+    def get_summoner_by_id(self, summoner_id, region='na1'):
+        endpoint = "SUMMONERV4"
+        url = f"https://{region}.api.riotgames.com/lol/summoner/v4/summoners/{summoner_id}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
 #if __name__ == "__main__":

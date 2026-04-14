@@ -1,10 +1,40 @@
-body {
-  background-color: #121212;
-  color: #fff;
+:root {
+	--bg: #0a0a0f;
+	--bg-surface: #141420;
+	--bg-hover: #1a1a2e;
+	--text: #e0e0e0;
+	--text-muted: #888;
+	--accent: #6366f1;
+	--accent-dim: #4f46e5;
+	--win: #22c55e;
+	--loss: #ef4444;
+	--border: #2a2a3e;
+	--gold: #f59e0b;
+	--concept-economy: #3b82f6;
+	--concept-objectives: #f59e0b;
+	--concept-vision: #8b5cf6;
+	--concept-fighting: #ef4444;
+	--concept-macro: #22c55e;
 }
 
-.page {
-  display: flex;
-  float: left;
-  padding: 100px;
+* {
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+body {
+	background-color: var(--bg);
+	color: var(--text);
+	font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+	line-height: 1.6;
+}
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+a:hover {
+	color: var(--accent-dim);
 }
