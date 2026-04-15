@@ -58,9 +58,10 @@ def cmd_eval():
     ckpt_path = os.path.join(CHECKPOINT_DIR, "baseline_full_best.pt")
     ckpt = torch.load(ckpt_path, map_location="cpu")
     puuid_index = ckpt["puuid_index"]
+    max_puuids = ckpt["model"]["player_enc.residual.weight"].shape[0]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = CausalTransformerBaseline(max_puuids=len(puuid_index) + 1).to(device)
+    model = CausalTransformerBaseline(max_puuids=max_puuids).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
