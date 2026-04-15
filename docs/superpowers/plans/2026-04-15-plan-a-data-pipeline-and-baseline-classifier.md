@@ -113,7 +113,7 @@ Expected: installs without errors. Torch download may take 1-2 minutes on first 
 
 - [ ] **Step 4: Verify torch imports**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`
 Expected: prints a version like `2.x.x` and either `True` or `False` for CUDA (we don't require CUDA for Plan A; CPU training is slow but sufficient for shakedown and works for the 95% target given corpus size).
 
 - [ ] **Step 5: Commit**
@@ -174,7 +174,7 @@ def test_num_event_types_matches_list():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_tokens.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_tokens.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.tokens'`.
 
 - [ ] **Step 3: Implement `code/model/tokens.py`**
@@ -220,7 +220,7 @@ VOCAB_SIZE = _RESERVED_COUNT + NUM_EVENT_TYPES
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_tokens.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_tokens.py -v`
 Expected: all 5 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -247,7 +247,7 @@ Run this one-liner to pick the match_id of the oldest game (stable, unlikely to 
 cd /home/lunaris/build/howtowin.lol && sqlite3 data/howtowin.db "SELECT match_id FROM games ORDER BY created_at ASC LIMIT 1"
 ```
 
-Record the returned match_id — call it `FIXTURE_MATCH_ID`. If the corpus is empty, run `cd code && python test/direct_parse.py` first to ingest a handful of games, then retry.
+Record the returned match_id — call it `FIXTURE_MATCH_ID`. If the corpus is empty, run `cd code && uv run python test/direct_parse.py` first to ingest a handful of games, then retry.
 
 - [ ] **Step 2: Write conftest with fixtures**
 
@@ -291,7 +291,7 @@ def test_fixture(fixture_match_id, all_match_ids):
     assert fixture_match_id in all_match_ids
 ```
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_fixtures_smoke.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_fixtures_smoke.py -v`
 Expected: PASS.
 
 - [ ] **Step 4: Delete smoke test**
@@ -380,7 +380,7 @@ def test_fountain_radius_positive():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_decisions.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_decisions.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.decisions'`.
 
 - [ ] **Step 3: Implement recall inference**
@@ -439,7 +439,7 @@ def infer_recalls(frames_by_ts):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_decisions.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_decisions.py -v`
 Expected: all 5 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -512,7 +512,7 @@ def test_fight_radius_and_window_positive():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_decisions.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_decisions.py -v`
 Expected: new tests FAIL with `ImportError: cannot import name 'infer_engages'`.
 
 - [ ] **Step 3: Implement engage/disengage inference**
@@ -599,7 +599,7 @@ def infer_engages(kill_events, frames_by_ts):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_decisions.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_decisions.py -v`
 Expected: all 8 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -650,8 +650,10 @@ def test_anchor_interval_is_60s(fixture_match_id):
     anchor_ts = [t.timestamp_ms for t in stream if t.type_id == ANCHOR_TOKEN]
     assert len(anchor_ts) >= 2
     # Consecutive anchor gaps should be 60000ms (Riot timeline cadence).
+    # Riot emits the final frame at match end, not on the minute boundary, so
+    # the last gap may be short; exclude it from the tolerance check.
     gaps = [anchor_ts[i + 1] - anchor_ts[i] for i in range(len(anchor_ts) - 1)]
-    assert all(abs(g - 60000) <= 1000 for g in gaps)
+    assert all(abs(g - 60000) <= 1000 for g in gaps[:-1])
 
 
 def test_event_tokens_reference_known_slots(fixture_match_id):
@@ -679,7 +681,7 @@ def test_recall_tokens_inferred(fixture_match_id):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_tokenizer.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_tokenizer.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.tokenizer'`.
 
 - [ ] **Step 3: Implement the tokenizer**
@@ -814,7 +816,7 @@ def tokenize_match(match_id):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_tokenizer.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_tokenizer.py -v`
 Expected: all 7 tests PASS. If `test_recall_tokens_inferred` fails, the fixture match may be too short — pick a longer match as fixture.
 
 - [ ] **Step 5: Commit**
@@ -876,7 +878,7 @@ def test_patch_vector_is_finite(fixture_match_id):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_patch_params.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_patch_params.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.patch_params'`.
 
 - [ ] **Step 3: Implement patch_params**
@@ -1036,7 +1038,7 @@ def patch_vector_for_match(match_id):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_patch_params.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_patch_params.py -v`
 Expected: all 5 tests PASS. First run downloads Data Dragon JSON (~20-30 MB); later runs use the local cache.
 
 - [ ] **Step 5: Commit**
@@ -1091,7 +1093,7 @@ def test_rank_tier_order_monotonic():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_player_features.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_player_features.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.player_features'`.
 
 - [ ] **Step 3: Implement player_features**
@@ -1197,7 +1199,7 @@ def player_feature_vector(puuid):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_player_features.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_player_features.py -v`
 Expected: all 3 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -1299,7 +1301,7 @@ def test_collate_batches_games(fixture_match_id):
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_dataset.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_dataset.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.dataset'`.
 
 - [ ] **Step 4: Implement the dataset**
@@ -1437,7 +1439,7 @@ def collate_games(samples):
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_dataset.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_dataset.py -v`
 Expected: all 4 tests PASS.
 
 - [ ] **Step 6: Commit**
@@ -1509,7 +1511,7 @@ def test_player_residual_updates_from_known_puuid():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_encoders.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_encoders.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.encoders'`.
 
 - [ ] **Step 3: Implement encoders**
@@ -1614,7 +1616,7 @@ class DynamicStreamEmbedder(nn.Module):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_encoders.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_encoders.py -v`
 Expected: all 4 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -1684,7 +1686,7 @@ def test_forward_is_differentiable():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_baseline.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_baseline.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.baseline'`.
 
 - [ ] **Step 3: Implement baseline**
@@ -1762,7 +1764,7 @@ class CausalTransformerBaseline(nn.Module):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_baseline.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_baseline.py -v`
 Expected: both tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -2049,7 +2051,7 @@ def test_shakedown_overfit_tiny_corpus():
 
 - [ ] **Step 4: Run the smoke test**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_integration.py -v -s`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_integration.py -v -s`
 Expected: passes within a few minutes on CPU. Expected `val_top5 > 0.1` after 5 epochs on 5 games.
 
 - [ ] **Step 5: Commit**
@@ -2104,7 +2106,7 @@ def test_top5_perfect_when_class_0_is_argmax():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_eval.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_eval.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'model.eval'`.
 
 - [ ] **Step 3: Implement eval**
@@ -2148,7 +2150,7 @@ def top5_by_minute(logits, labels, mask, timestamps, k=5):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m pytest tests/model/test_eval.py -v`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m pytest tests/model/test_eval.py -v`
 Expected: both tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -2286,7 +2288,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Verify imports**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -c "from model import cli; print('cli module imports OK')"`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -c "from model import cli; print('cli module imports OK')"`
 Expected: prints the OK message.
 
 - [ ] **Step 3: Commit**
@@ -2307,7 +2309,7 @@ Run the pipeline shakedown. Proves end-to-end wiring by overfitting a 50-game su
 
 - [ ] **Step 1: Run shakedown**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m model.cli shakedown 2>&1 | tee /tmp/shakedown.log`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m model.cli shakedown 2>&1 | tee /tmp/shakedown.log`
 Expected: completes in 5–30 minutes on CPU. Final line should read `M1 acceptance: best >= 0.9 (near-overfit on 50 games)` with `best` ≥ 0.9.
 
 - [ ] **Step 2: Diagnose if it fails**
@@ -2347,12 +2349,12 @@ Train on the full train split and measure held-out top-5.
 
 - [ ] **Step 1: Launch full training run**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m model.cli train --epochs 40 2>&1 | tee /tmp/train.log`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m model.cli train --epochs 40 2>&1 | tee /tmp/train.log`
 Expected: runs to completion. Duration depends on corpus size and hardware — a few hours on a single GPU, overnight on CPU for ~700 games.
 
 - [ ] **Step 2: Held-out evaluation**
 
-Run: `cd /home/lunaris/build/howtowin.lol/code && python -m model.cli eval 2>&1 | tee /tmp/eval.log`
+Run: `cd /home/lunaris/build/howtowin.lol/code && uv run python -m model.cli eval 2>&1 | tee /tmp/eval.log`
 Expected: prints overall top-5 and per-minute breakdown.
 
 - [ ] **Step 3: Interpret the result**

@@ -11,3 +11,15 @@ players/*
 .dolt/
 *.db
 .beads-credential-key
+
+# Python
+__pycache__/
+*.pyc
+
+# Data artifacts (regeneratable or machine-local)
+data/dragon_cache/
+data/model_checkpoints/
+
+# Editor / tool session state
+.claude/
+.playwright-mcp/
