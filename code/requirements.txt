@@ -2,3 +2,6 @@ redis
 requests
 scikit-learn
 pandas
+torch
+numpy
+pytest
