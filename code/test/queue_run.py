@@ -15,8 +15,10 @@ from fetch import agent
 from parser import parser
 from db import get_conn
 
-IDLE_TIMEOUT_S = 8
-MAX_WALL_S = 240
+IDLE_TIMEOUT_S = 15
+MAX_WALL_S = 4800
+MATCH_COUNT = 10
+MON_INTERVAL_S = 15
 
 
 def drain_players(stop_flag):
@@ -41,7 +43,7 @@ def drain_players(stop_flag):
         a.sadd('player_processing', a.player)
         print(f'[player] handling {a.player[:20]}...', flush=True)
         try:
-            a.handle_player(match_count=8)
+            a.handle_player(match_count=MATCH_COUNT)
             print(f'[player] done {a.player[:20]}', flush=True)
         except Exception:
             print('[player] handle_player error', flush=True)
@@ -94,17 +96,20 @@ def main():
     mon = agent.connect()
     start = time.time()
     while time.time() - start < MAX_WALL_S:
-        time.sleep(3)
+        time.sleep(MON_INTERVAL_S)
         pq = mon.zcard('player_queue')
         mq = mon.zcard('match_queue')
+        pp = mon.scard('player_processing')
+        mp = mon.scard('match_processing')
         handled = mon.scard('match_handled')
         conn = get_conn()
         games = conn.execute('SELECT COUNT(*) FROM games').fetchone()[0]
         frames = conn.execute('SELECT COUNT(*) FROM frames').fetchone()[0]
         events = conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
         conn.close()
-        print(f'  [mon] pq={pq} mq={mq} handled={handled} | games={games} frames={frames} events={events}')
-        if pq == 0 and mq == 0 and handled > 0:
+        elapsed = int(time.time() - start)
+        print(f'  [mon t={elapsed}s] pq={pq}/{pp} mq={mq}/{mp} handled={handled} | games={games} frames={frames} events={events}', flush=True)
+        if pq == 0 and mq == 0 and pp == 0 and mp == 0 and handled > 0:
             print('[mon] drained, stopping')
             break
 

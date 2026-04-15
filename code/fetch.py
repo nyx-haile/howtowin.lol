@@ -92,19 +92,30 @@ class agent(Redis):
         pass
 
     def ratelimit(self, func, *args, **kwargs):
-        endpoint = kwargs.pop("endpoint")
-        counter_max = int(self.get(f"cmax_{endpoint}"))
-        interval = int(self.get(f"interval_{endpoint}"))
-        counter = int(self.get(f"counter{endpoint}"))
-        self.incr(f"counter{endpoint}")
-        self.expire(f"counter{endpoint}", interval)
+        kwargs.pop("endpoint", None)
+        counter_max_short = int(self.get("cmax_short"))
+        counter_max_long = int(self.get("cmax_long"))
+        interval_short = int(self.get("interval_short"))
+        interval_long = int(self.get("interval_long"))
+
         self.ratelimitcounter += 1
-        assert self.ratelimitcounter <= 200, (counter, counter_max)
-        if counter < counter_max:
-            return func(*args, **kwargs)
-        else: 
-            time.sleep(10*interval/counter_max)
-            return func(*args, **kwargs)
+        assert self.ratelimitcounter <= 10000
+
+        while True:
+            short = int(self.get("counter_short"))
+            long_ = int(self.get("counter_long"))
+            if short < counter_max_short and long_ < counter_max_long:
+                self.incr("counter_short")
+                self.expire("counter_short", interval_short)
+                self.incr("counter_long")
+                self.expire("counter_long", interval_long)
+                return func(*args, **kwargs)
+            wait = max(
+                (interval_long / counter_max_long) if long_ >= counter_max_long else 0,
+                (interval_short / counter_max_short) if short >= counter_max_short else 0,
+                0.2,
+            )
+            time.sleep(wait)
 
 
     def request(self, url, headers, endpoint):

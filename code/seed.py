@@ -3,7 +3,7 @@ from db import get_conn, init_db, insert_player
 import sys
 
 
-def seed_top_players():
+def seed_top_players(per_tier=50):
     init_db()
     seed = agent.connect()
     conn = get_conn()
@@ -17,31 +17,22 @@ def seed_top_players():
             continue
 
         entries = sorted(league.get('entries', []),
-                         key=lambda e: e.get('leaguePoints', 0), reverse=True)[:50]
+                         key=lambda e: e.get('leaguePoints', 0), reverse=True)[:per_tier]
 
         for entry in entries:
-            summoner = seed.get_summoner_by_id(entry['summonerId'])
-            if not summoner:
-                continue
-            puuid = summoner.get('puuid')
+            puuid = entry.get('puuid')
             if not puuid:
                 continue
-
-            account = seed.get_account_by_puuid(puuid)
-            riot_id = None
-            if account:
-                name = account.get('gameName', '')
-                tag = account.get('tagLine', '')
-                riot_id = f"{name}#{tag}" if name else None
-
-            insert_player(conn, puuid, riot_id, tier, 'I', entry.get('leaguePoints', 0))
-            seed.zadd("player_queue", {puuid: entry.get('leaguePoints', 0)})
+            lp = entry.get('leaguePoints', 0)
+            insert_player(conn, puuid, None, tier, entry.get('rank', 'I'), lp)
+            seed.zadd("player_queue", {puuid: lp})
             count += 1
-            print(f"Seeded {riot_id or puuid[:20]} ({tier} {entry.get('leaguePoints', 0)} LP)")
+
+        print(f"Seeded {per_tier} from {tier}")
 
     conn.commit()
     conn.close()
-    print(f"Seeded {count} players")
+    print(f"Seeded {count} players total")
 
 
 def seed_single(game_name, tag_line):
