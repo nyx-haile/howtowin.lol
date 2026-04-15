@@ -100,9 +100,6 @@ def patch_vector_for_match(match_id):
         game = conn.execute(
             "SELECT patch FROM games WHERE match_id = ?", (match_id,)
         ).fetchone()
-        raw_picks_rows = conn.execute(
-            "SELECT match_id FROM games WHERE match_id = ?", (match_id,)
-        ).fetchall()
     finally:
         conn.close()
 
@@ -126,18 +123,18 @@ def patch_vector_for_match(match_id):
                     vec[offset + i * len(CHAMP_STAT_FIELDS) + j] = float(stats.get(fname, 0.0))
     offset = 10 * len(CHAMP_STAT_FIELDS)  # = 100
 
-    # Aggregated item stats from final builds.
-    if match:
-        item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
-        for p in match["info"]["participants"][:10]:
-            for slot in range(7):
-                iid = p.get(f"item{slot}", 0)
-                if iid and str(iid) in items:
-                    idata = items[str(iid)]
-                    for fname in ITEM_STAT_FIELDS:
-                        item_totals[fname] += float(idata.get("stats", {}).get(fname, 0.0))
-        for j, fname in enumerate(ITEM_STAT_FIELDS):
-            vec[offset + j] = item_totals[fname]
+    # Patch-level item stat aggregate (match-independent). Summing over every
+    # item available on the patch is a coarse proxy for the patch's item meta —
+    # it varies with the patch, not with what any particular match bought, so
+    # it cannot leak outcomes. Reading end-of-game item slots here would be
+    # label leakage since the static vector is prefixed to the sequence.
+    item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
+    for idata in items.values():
+        stats = idata.get("stats", {})
+        for fname in ITEM_STAT_FIELDS:
+            item_totals[fname] += float(stats.get(fname, 0.0))
+    for j, fname in enumerate(ITEM_STAT_FIELDS):
+        vec[offset + j] = item_totals[fname]
     offset += len(ITEM_STAT_FIELDS)  # = 120
 
     # Version one-hot proxy.
