@@ -650,8 +650,10 @@ def test_anchor_interval_is_60s(fixture_match_id):
     anchor_ts = [t.timestamp_ms for t in stream if t.type_id == ANCHOR_TOKEN]
     assert len(anchor_ts) >= 2
     # Consecutive anchor gaps should be 60000ms (Riot timeline cadence).
+    # Riot emits the final frame at match end, not on the minute boundary, so
+    # the last gap may be short; exclude it from the tolerance check.
     gaps = [anchor_ts[i + 1] - anchor_ts[i] for i in range(len(anchor_ts) - 1)]
-    assert all(abs(g - 60000) <= 1000 for g in gaps)
+    assert all(abs(g - 60000) <= 1000 for g in gaps[:-1])
 
 
 def test_event_tokens_reference_known_slots(fixture_match_id):
