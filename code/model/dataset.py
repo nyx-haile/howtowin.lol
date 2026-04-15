@@ -61,8 +61,9 @@ def _build_labels(tokens):
 
 
 class MatchDataset(Dataset):
-    def __init__(self, match_ids):
+    def __init__(self, match_ids, puuid_index=None):
         self.match_ids = list(match_ids)
+        self.puuid_index = puuid_index or {}
 
     def __len__(self):
         return len(self.match_ids)
@@ -80,13 +81,16 @@ class MatchDataset(Dataset):
 
         match, _ = get_raw_match(mid)
         players = torch.zeros(10, PLAYER_FEATURE_DIM, dtype=torch.float32)
+        player_ids = torch.zeros(10, dtype=torch.long)
         if match:
             for i_p, p in enumerate(match["info"]["participants"][:10]):
                 players[i_p] = torch.tensor(player_feature_vector(p["puuid"]), dtype=torch.float32)
+                player_ids[i_p] = self.puuid_index.get(p["puuid"], 0)
 
         return {
             "static": static,
             "players": players,
+            "player_ids": player_ids,
             "tokens": token_ids,
             "token_actors": token_actors,
             "token_timestamps": token_ts,
@@ -96,7 +100,6 @@ class MatchDataset(Dataset):
 
 
 def collate_games(samples):
-    """Pad sequences to the longest in the batch."""
     max_len = max(s["tokens"].shape[0] for s in samples)
     B = len(samples)
     tokens = torch.full((B, max_len), PAD_TOKEN, dtype=torch.long)
@@ -104,7 +107,7 @@ def collate_games(samples):
     ts = torch.zeros(B, max_len, dtype=torch.float32)
     labels = torch.zeros(B, max_len, NUM_EVENT_TYPES, dtype=torch.float32)
     mask = torch.zeros(B, max_len, dtype=torch.float32)
-    key_pad = torch.ones(B, max_len, dtype=torch.bool)  # True = pad
+    key_pad = torch.ones(B, max_len, dtype=torch.bool)
 
     for b, s in enumerate(samples):
         L = s["tokens"].shape[0]
@@ -118,6 +121,7 @@ def collate_games(samples):
     return {
         "static": torch.stack([s["static"] for s in samples]),
         "players": torch.stack([s["players"] for s in samples]),
+        "player_ids": torch.stack([s["player_ids"] for s in samples]),
         "tokens": tokens,
         "token_actors": actors,
         "token_timestamps": ts,
@@ -125,3 +129,28 @@ def collate_games(samples):
         "label_mask": mask,
         "key_pad_mask": key_pad,
     }
+
+
+def build_puuid_index(match_ids, max_puuids=20000):
+    """Assign integer IDs 1..max_puuids-1 to the most-frequent puuids in the
+    given match_ids. Returns dict puuid -> id. Unknown puuids resolve to 0.
+    """
+    from collections import Counter
+    counts = Counter()
+    for mid in match_ids:
+        match, _ = get_raw_match(mid)
+        if not match:
+            continue
+        for p in match["info"]["participants"][:10]:
+            counts[p["puuid"]] += 1
+    ranked = [puuid for puuid, _ in counts.most_common(max_puuids - 1)]
+    return {puuid: i + 1 for i, puuid in enumerate(ranked)}
+
+
+def puuid_ids_for_match(match_id, puuid_index):
+    match, _ = get_raw_match(match_id)
+    ids = torch.zeros(10, dtype=torch.long)
+    if match:
+        for i, p in enumerate(match["info"]["participants"][:10]):
+            ids[i] = puuid_index.get(p["puuid"], 0)
+    return ids
