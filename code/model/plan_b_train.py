@@ -28,7 +28,7 @@ def _get_device():
 
 
 def _batch_to_device(batch, device):
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v
+    return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()}
 
 
@@ -127,7 +127,8 @@ def _combined_loss(losses, rollout_aux):
 @torch.no_grad()
 def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
     from sklearn.metrics import roc_auc_score
-    loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
+    loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False,
+                        num_workers=2, persistent_workers=True, pin_memory=(device.type == "cuda"))
     y_true, y_score = [], []
     model.eval()
     for batch in loader:
@@ -135,8 +136,9 @@ def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> f
         out = model(batch)
         T = out["n_anchors"]
         minute_idx = min(target_minute, T - 1)
-        y_score.append(torch.sigmoid(out["outcome_logits"])[0, minute_idx].item())
-        y_true.append(float(batch["outcome"][0].item()))
+        probs = torch.sigmoid(out["outcome_logits"])[:, minute_idx]  # (B,)
+        y_score.extend(probs.cpu().tolist())
+        y_true.extend(batch["outcome"].cpu().tolist())
     model.train()
     if len(set(y_true)) < 2:
         return 0.5
@@ -160,6 +162,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
 
     device = _get_device()
     use_amp = device.type == "cuda"
+    if use_amp:
+        torch.backends.cudnn.benchmark = True
     model = PlanBModel(max_puuids=max_puuids).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -170,14 +174,15 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     patience_left = EARLY_STOP_PATIENCE
     best_path = os.path.join(CHECKPOINT_DIR, f"{checkpoint_tag}_best.pt")
 
+    loader = DataLoader(train_ds, batch_size=batch_size,
+                        collate_fn=collate_games, shuffle=True,
+                        num_workers=4, persistent_workers=True,
+                        prefetch_factor=2, pin_memory=use_amp,
+                        multiprocessing_context="forkserver")
+    n_train_batches = len(loader)
+
     for ep in range(epochs):
         model.train()
-        loader = DataLoader(train_ds, batch_size=batch_size,
-                            collate_fn=collate_games, shuffle=True,
-                            num_workers=4, persistent_workers=True,
-                            prefetch_factor=2, pin_memory=use_amp,
-                            multiprocessing_context="forkserver")
-        n_train_batches = len(loader)
         ep_start = time.time()
         ep_loss = 0.0
         n_batches = 0
@@ -188,7 +193,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                 losses = _compute_losses(out, batch)
                 aux = _rollout_aux_loss(model, out, batch)
                 loss = _combined_loss(losses, aux)
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
