@@ -13,6 +13,7 @@ def test_overfit_tiny_corpus_drives_loss_down():
         epochs=3, batch_size=1, lr=1e-3,
         max_puuids=50,
         checkpoint_tag="plan_b_smoke",
+        num_workers=0,
     )
     first, last = history["train_loss"][0], history["train_loss"][-1]
     assert last < first, f"smoke test: train loss did not decrease ({first} -> {last})"

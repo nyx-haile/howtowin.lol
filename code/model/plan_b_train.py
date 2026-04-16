@@ -149,7 +149,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       epochs: int = 30, batch_size: int = 8, lr: float = 3e-4,
                       max_puuids: int = 20000,
                       log_every: int = 10,
-                      checkpoint_tag: str = "plan_b_full"):
+                      checkpoint_tag: str = "plan_b_full",
+                      num_workers: int = 4):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
 
@@ -176,9 +177,11 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
 
     loader = DataLoader(train_ds, batch_size=batch_size,
                         collate_fn=collate_games, shuffle=True,
-                        num_workers=4, persistent_workers=True,
-                        prefetch_factor=2, pin_memory=use_amp,
-                        multiprocessing_context="forkserver")
+                        num_workers=num_workers,
+                        persistent_workers=(num_workers > 0),
+                        prefetch_factor=(2 if num_workers > 0 else None),
+                        pin_memory=use_amp,
+                        multiprocessing_context=("forkserver" if num_workers > 0 else None))
     n_train_batches = len(loader)
 
     for ep in range(epochs):
