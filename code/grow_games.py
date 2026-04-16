@@ -93,6 +93,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Grow the games DB to a target count.")
     parser.add_argument("--target", type=int, default=10_000, help="Desired total games in DB (default: 10000).")
     parser.add_argument("--seed-top", action="store_true", help="Seed challenger players across all servers before crawling.")
+    parser.add_argument("--refresh-seed-cache", action="store_true", help="Force re-fetch seed list from Riot API even if cache is fresh.")
     parser.add_argument("--per-tier", type=int, default=50, help="Players per tier when --seed-top is used.")
     parser.add_argument(
         "--seed-regions",
@@ -172,6 +173,7 @@ def main() -> int:
             per_tier=args.per_tier,
             regions=regions,
             include_grandmaster=not args.no_grandmaster,
+            refresh_cache=args.refresh_seed_cache,
         )
 
     start_ts = time.time()

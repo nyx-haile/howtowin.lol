@@ -1,6 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
-from fetch import agent
+from fetch import agent, route_for_match
 from db import get_conn, init_db, insert_game, insert_frame, insert_player, insert_event
 from raw_db import get_raw_conn, init_raw_db, insert_raw_match
 
@@ -94,6 +94,7 @@ class parser(agent):
             insert_player(conn, pdata['puuid'], riot_id)
 
         puuids = [p["puuid"] for p in self.participants.values()]
+        match_route = route_for_match(match_id)
         placeholders = ",".join(["?"] * len(puuids))
         ranked_rows = conn.execute(
             f"SELECT puuid, rank_tier, lp FROM players WHERE puuid IN ({placeholders})",
@@ -105,6 +106,7 @@ class parser(agent):
                 continue
             rank_tier, lp = rank_map.get(puuid, (None, 0))
             self.zincrby("player_queue", _queue_priority(rank_tier, lp), puuid)
+            self.hset("player_region", puuid, match_route)
 
         # Process timeline
         for frame in self.match_timeline['info']['frames']:

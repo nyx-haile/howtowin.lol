@@ -17,7 +17,7 @@ from db import get_conn
 
 IDLE_TIMEOUT_S = 15
 MAX_WALL_S = 4800
-MATCH_COUNT = 10
+MATCH_COUNT = 100
 MON_INTERVAL_S = 15
 
 
@@ -41,12 +41,12 @@ def drain_players(stop_flag):
             return
         a.player = res[1].decode('utf-8')
         a.sadd('player_processing', a.player)
-        print(f'[player] handling {a.player[:20]}...', flush=True)
+        t0 = time.time()
         try:
-            a.handle_player(match_count=MATCH_COUNT)
-            print(f'[player] done {a.player[:20]}', flush=True)
+            a.handle_player(match_count=MATCH_COUNT, skip_rank=True)
+            print(f'[player] done {a.player[:20]} in {time.time()-t0:.1f}s', flush=True)
         except Exception:
-            print('[player] handle_player error', flush=True)
+            print(f'[player] handle_player error after {time.time()-t0:.1f}s', flush=True)
             traceback.print_exc()
 
 
@@ -75,14 +75,14 @@ def drain_matches(stop_flag):
             return
         p.match = res[1].decode('utf-8')
         p.sadd('match_processing', p.match)
-        print(f'[match] parsing {p.match}', flush=True)
+        t0 = time.time()
         try:
             p.handle_match()
             p.srem('match_processing', p.match)
             p.sadd('match_handled', p.match)
-            print(f'[match] done {p.match}', flush=True)
+            print(f'[match] done {p.match} in {time.time()-t0:.1f}s', flush=True)
         except Exception:
-            print(f'[match] handle_match error on {p.match}', flush=True)
+            print(f'[match] error on {p.match} after {time.time()-t0:.1f}s', flush=True)
             traceback.print_exc()
 
 

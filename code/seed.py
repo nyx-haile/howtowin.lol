@@ -1,8 +1,14 @@
+import json
+import os
 import requests
 import sys
+import time
 
-from fetch import agent
+from fetch import agent, route_for_platform
 from db import get_conn, init_db, insert_player
+
+SEED_CACHE_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'seed_cache.json')
+SEED_CACHE_MAX_AGE_S = 7 * 24 * 3600  # refresh weekly
 
 PLATFORM_REGIONS = [
     "br1",
@@ -47,16 +53,14 @@ def _normalize_regions(regions):
     return [r.strip().lower() for r in regions if r and r.strip()]
 
 
-def seed_top_players(per_tier=50, regions=None, include_grandmaster=True):
-    init_db()
+def _fetch_top_players_from_api(per_tier, regions, include_grandmaster):
+    """Fetch challenger/grandmaster puuids from Riot API and return a list of dicts."""
     seed = agent.connect()
-    conn = get_conn()
-    count = 0
-
     tiers = [("CHALLENGER", seed.get_challenger_league)]
     if include_grandmaster:
         tiers.append(("GRANDMASTER", seed.get_grandmaster_league))
 
+    entries_out = []
     for region in _normalize_regions(regions):
         for tier, fetch_fn in tiers:
             try:
@@ -67,27 +71,57 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True):
             if not league:
                 print(f"Failed to fetch {tier} league for {region}")
                 continue
-
             entries = sorted(
                 league.get("entries", []),
                 key=lambda e: e.get("leaguePoints", 0),
                 reverse=True,
             )[:per_tier]
-
-            seeded = 0
             for entry in entries:
-                puuid = entry.get("puuid")
-                if not puuid:
-                    continue
-                lp = int(entry.get("leaguePoints", 0) or 0)
-                division = entry.get("rank", "I")
-                insert_player(conn, puuid, None, tier, division, lp)
-                if not seed.sismember("player_handled", puuid):
-                    seed.zincrby("player_queue", _tier_priority(tier, lp), puuid)
-                seeded += 1
-                count += 1
+                if entry.get("puuid"):
+                    entries_out.append({
+                        "puuid": entry["puuid"],
+                        "tier": tier,
+                        "division": entry.get("rank", "I"),
+                        "lp": int(entry.get("leaguePoints", 0) or 0),
+                        "region": region,
+                    })
+            print(f"Fetched {len(entries)} from {tier} ({region})")
+    return entries_out
 
-            print(f"Seeded {seeded} from {tier} ({region})")
+
+def seed_top_players(per_tier=50, regions=None, include_grandmaster=True, refresh_cache=False):
+    init_db()
+    conn = get_conn()
+    seed = agent.connect()
+
+    # Use cache if fresh; fetch from API otherwise.
+    cache_valid = (
+        not refresh_cache
+        and regions is None  # custom region lists always bypass cache
+        and os.path.exists(SEED_CACHE_PATH)
+        and (time.time() - os.path.getmtime(SEED_CACHE_PATH)) < SEED_CACHE_MAX_AGE_S
+    )
+    if cache_valid:
+        with open(SEED_CACHE_PATH) as f:
+            all_entries = json.load(f)
+        print(f"Using seed cache ({len(all_entries)} players, {int((time.time() - os.path.getmtime(SEED_CACHE_PATH))/3600)}h old)")
+    else:
+        print("Fetching fresh seed list from Riot API...")
+        all_entries = _fetch_top_players_from_api(per_tier, regions, include_grandmaster)
+        if regions is None:
+            os.makedirs(os.path.dirname(SEED_CACHE_PATH), exist_ok=True)
+            with open(SEED_CACHE_PATH, 'w') as f:
+                json.dump(all_entries, f)
+            print(f"Cached {len(all_entries)} players to {SEED_CACHE_PATH}")
+
+    count = 0
+    for entry in all_entries:
+        puuid = entry["puuid"]
+        insert_player(conn, puuid, None, entry["tier"], entry["division"], entry["lp"])
+        if not seed.sismember("player_handled", puuid):
+            seed.zincrby("player_queue", _tier_priority(entry["tier"], entry["lp"]), puuid)
+            seed.hset("player_region", puuid, route_for_platform(entry["region"]))
+        count += 1
 
     conn.commit()
     conn.close()
