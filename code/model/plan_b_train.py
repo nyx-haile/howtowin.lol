@@ -20,6 +20,17 @@ HEAD_WEIGHTS = {"outcome": 0.35, "next_event": 0.35,
 EARLY_STOP_PATIENCE = 5
 
 
+def _get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _batch_to_device(batch, device):
+    return {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()}
+
+
 def _outcome_labels(batch):
     # (B,) -> broadcast to (B, T)
     win = batch["outcome"]  # dataset must supply this (game winner label per sample)
@@ -113,12 +124,13 @@ def _combined_loss(losses, rollout_aux):
 
 
 @torch.no_grad()
-def _eval_outcome_auc_at_minute(model, ds, target_minute: int = 15) -> float:
+def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
     from sklearn.metrics import roc_auc_score
     loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
     y_true, y_score = [], []
     model.eval()
     for batch in loader:
+        batch = _batch_to_device(batch, device)
         out = model(batch)
         T = out["n_anchors"]
         minute_idx = min(target_minute, T - 1)
@@ -144,8 +156,10 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) \
               if cold_match_ids else None
 
-    model = PlanBModel(max_puuids=max_puuids)
+    device = _get_device()
+    model = PlanBModel(max_puuids=max_puuids).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    print(f"device={device}  params={sum(p.numel() for p in model.parameters()):,}")
 
     history = {"train_loss": [], "game_cold_auc15": [], "player_cold_auc15": []}
     best_cold_auc = -1.0
@@ -159,6 +173,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         ep_loss = 0.0
         n_batches = 0
         for batch in loader:
+            batch = _batch_to_device(batch, device)
             out = model(batch)
             losses = _compute_losses(out, batch)
             aux = _rollout_aux_loss(model, out, batch)
@@ -172,8 +187,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         ep_loss /= max(1, n_batches)
         history["train_loss"].append(ep_loss)
 
-        game_auc = _eval_outcome_auc_at_minute(model, val_ds, 15)
-        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, 15) if cold_ds else 0.5
+        game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15)
+        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15) if cold_ds else 0.5
         history["game_cold_auc15"].append(game_auc)
         history["player_cold_auc15"].append(cold_auc)
 
@@ -183,7 +198,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         if cold_auc > best_cold_auc + 1e-4:
             best_cold_auc = cold_auc
             patience_left = EARLY_STOP_PATIENCE
-            torch.save({"state_dict": model.state_dict(),
+            torch.save({"state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
                         "max_puuids": max_puuids,
                         "history": history}, best_path)
         else:
