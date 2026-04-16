@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -131,8 +132,17 @@ def main() -> int:
 
     if args.db_dir:
         os.makedirs(args.db_dir, exist_ok=True)
-        os.environ['HOWL_DB_PATH'] = os.path.join(args.db_dir, 'howtowin.db')
-        os.environ['HOWL_RAW_DB_PATH'] = os.path.join(args.db_dir, 'raw_matches.db')
+        data_dir = os.path.join(code_dir, '..', 'data')
+        staging_db = os.path.join(args.db_dir, 'howtowin.db')
+        staging_raw = os.path.join(args.db_dir, 'raw_matches.db')
+        # Seed staging dir from main DBs so we don't re-fetch existing games.
+        for src, dst in [(os.path.join(data_dir, 'howtowin.db'), staging_db),
+                         (os.path.join(data_dir, 'raw_matches.db'), staging_raw)]:
+            if not os.path.exists(dst) and os.path.exists(src):
+                print(f"Copying {src} -> {dst}")
+                shutil.copy2(src, dst)
+        os.environ['HOWL_DB_PATH'] = staging_db
+        os.environ['HOWL_RAW_DB_PATH'] = staging_raw
         print(f"Writing to separate DBs in {args.db_dir}")
 
     init_db()
