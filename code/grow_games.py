@@ -67,19 +67,24 @@ def render_progress(current: int, target: int, start_count: int, start_ts: float
     print(line, end="", flush=True)
 
 
-def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float, poll_s: float) -> None:
-    proc = subprocess.Popen(
-        [sys.executable, os.path.join("test", "queue_run.py")],
-        cwd=code_dir,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-    )
-    while proc.poll() is None:
+def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float,
+                   poll_s: float, n_workers: int = 1) -> None:
+    procs = []
+    for _ in range(n_workers):
+        procs.append(subprocess.Popen(
+            [sys.executable, os.path.join("test", "queue_run.py")],
+            cwd=code_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        ))
+
+    while any(p.poll() is None for p in procs):
         render_progress(get_game_count(), target, start_count, start_ts)
         time.sleep(poll_s)
 
-    if proc.returncode != 0:
-        raise RuntimeError(f"queue_run.py exited with code {proc.returncode}")
+    for p in procs:
+        if p.returncode and p.returncode != 0:
+            raise RuntimeError(f"queue_run.py exited with code {p.returncode}")
 
 
 def main() -> int:
@@ -119,6 +124,7 @@ def main() -> int:
         help="Write to separate DBs in this directory (for parallel growth while training reads the main DB).",
     )
     parser.add_argument("--clear-queues", action="store_true", help="Clear redis queues/tracking keys before crawling.")
+    parser.add_argument("--workers", type=int, default=3, help="Number of parallel queue_run.py workers (default: 3).")
     parser.add_argument("--poll-seconds", type=float, default=2.0, help="Progress bar refresh interval in seconds.")
     parser.add_argument(
         "--max-stagnant-runs",
@@ -178,7 +184,7 @@ def main() -> int:
     render_progress(current, args.target, start_count, start_ts)
 
     while current < args.target:
-        run_queue_once(code_dir, args.target, start_count, start_ts, args.poll_seconds)
+        run_queue_once(code_dir, args.target, start_count, start_ts, args.poll_seconds, args.workers)
         new_count = get_game_count()
         render_progress(new_count, args.target, start_count, start_ts)
 
