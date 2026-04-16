@@ -8,6 +8,8 @@ top-5 eval asks whether the top-5 predicted classes cover the truth.
 Plan A uses multi-hot targets to match "top-5 of next-minute events".
 """
 import os
+from collections import OrderedDict
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -20,17 +22,41 @@ from model.tokens import (
 from model.patch_params import patch_vector_for_match, PATCH_VECTOR_DIM
 from model.player_features import player_feature_vector, PLAYER_FEATURE_DIM
 
+# Decision types for next-decision head.
+DECISION_MAP = {
+    EVENT_TYPE_TO_ID.get("ITEM_PURCHASED", -1): 0,
+    EVENT_TYPE_TO_ID.get("SKILL_LEVEL_UP", -1): 1,
+    EVENT_TYPE_TO_ID.get("WARD_PLACED", -1): 2,
+    EVENT_TYPE_TO_ID.get("RECALL", -1): 3,
+    EVENT_TYPE_TO_ID.get("ENGAGE", -1): 4,
+    EVENT_TYPE_TO_ID.get("DISENGAGE", -1): 5,
+}
+DECISION_MAP.pop(-1, None)  # remove sentinel if any key wasn't found
+NO_DECISION = 6
+FRAME_FEAT_DIM = 6
+
+# Per-feature normalization scales for frame features so the model sees O(1) values.
+# Order: total_gold, xp, level, pos_x, pos_y, cs
+FRAME_FEAT_SCALE = np.array([5000.0, 5000.0, 18.0, 15000.0, 15000.0, 200.0], dtype=np.float32)
+
 
 SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits')
 
 
 def load_split(name):
-    """name in {'holdout', 'train'}. 'train' = all games minus holdout."""
+    """name in {'holdout', 'train', 'cold'}."""
     holdout_path = os.path.join(SPLIT_DIR, 'plan_a_holdout.txt')
     with open(holdout_path) as f:
         holdout = [line.strip() for line in f if line.strip()]
+
+    if name == 'cold':
+        from model.cold_holdout import load_player_cold_holdout
+        return sorted(load_player_cold_holdout())
+
     if name == 'holdout':
         return holdout
+
+    # 'train' — subtract both game-cold and player-cold holdouts.
     conn = get_conn()
     try:
         all_ids = [r["match_id"] for r in
@@ -38,7 +64,12 @@ def load_split(name):
     finally:
         conn.close()
     hset = set(holdout)
-    return [m for m in all_ids if m not in hset]
+    from model.cold_holdout import load_player_cold_holdout
+    try:
+        player_cold = load_player_cold_holdout()
+    except FileNotFoundError:
+        player_cold = set()
+    return [m for m in all_ids if m not in hset and m not in player_cold]
 
 
 def _build_labels(tokens):
@@ -61,14 +92,27 @@ def _build_labels(tokens):
 
 
 class MatchDataset(Dataset):
-    def __init__(self, match_ids, puuid_index=None):
+    def __init__(self, match_ids, puuid_index=None, exclude_match_ids=None):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
+        self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
+        self._cache = OrderedDict()  # LRU cache; capped to avoid OOM with large corpora
+        self._cache_max = min(len(self.match_ids), 2000)  # ~2K games fits comfortably in 32GB
 
     def __len__(self):
         return len(self.match_ids)
 
     def __getitem__(self, i):
+        if i in self._cache:
+            self._cache.move_to_end(i)
+            return self._cache[i]
+        sample = self._load(i)
+        self._cache[i] = sample
+        if len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
+        return sample
+
+    def _load(self, i):
         mid = self.match_ids[i]
         tokens = tokenize_match(mid)
         labels, label_mask = _build_labels(tokens)
@@ -84,8 +128,60 @@ class MatchDataset(Dataset):
         player_ids = torch.zeros(10, dtype=torch.long)
         if match:
             for i_p, p in enumerate(match["info"]["participants"][:10]):
-                players[i_p] = torch.tensor(player_feature_vector(p["puuid"]), dtype=torch.float32)
+                players[i_p] = torch.tensor(
+                    player_feature_vector(p["puuid"], exclude_match_ids=self.exclude_match_ids),
+                    dtype=torch.float32,
+                )
                 player_ids[i_p] = self.puuid_index.get(p["puuid"], 0)
+
+        # --- Plan B anchor windowing ---
+        anchor_idx = [j for j, tok in enumerate(tokens) if tok.type_id == ANCHOR_TOKEN]
+
+        # Frame features per anchor from the frames table.
+        conn = get_conn()
+        try:
+            frame_feats = np.zeros((len(anchor_idx), 10, FRAME_FEAT_DIM), dtype=np.float32)
+            for ai, a_i in enumerate(anchor_idx):
+                ts_ms = tokens[a_i].timestamp_ms
+                rows = conn.execute(
+                    "SELECT participant_slot, total_gold, xp, level, pos_x, pos_y, cs "
+                    "FROM frames WHERE match_id = ? AND timestamp_ms = ? "
+                    "ORDER BY participant_slot",
+                    (mid, ts_ms),
+                ).fetchall()
+                for r in rows:
+                    slot = r["participant_slot"]
+                    if 1 <= slot <= 10:
+                        frame_feats[ai, slot - 1] = [
+                            float(r["total_gold"] or 0), float(r["xp"] or 0),
+                            float(r["level"] or 0), float(r["pos_x"] or 0),
+                            float(r["pos_y"] or 0), float(r["cs"] or 0),
+                        ]
+
+            # Normalize frame features to O(1) range.
+            frame_feats /= FRAME_FEAT_SCALE[np.newaxis, np.newaxis, :]
+
+            # Outcome: blue team (100) win = 1, red (200) win = 0.
+            game_row = conn.execute(
+                "SELECT winning_team FROM games WHERE match_id = ?", (mid,)
+            ).fetchone()
+            outcome = 1 if game_row and game_row["winning_team"] == 100 else 0
+        finally:
+            conn.close()
+
+        # Decision labels per anchor per participant.
+        decision_labels = np.full((len(anchor_idx), 10), NO_DECISION, dtype=np.int64)
+        for ti, a_i in enumerate(anchor_idx):
+            nxt = anchor_idx[ti + 1] if ti + 1 < len(anchor_idx) else len(tokens)
+            for tok in tokens[a_i + 1:nxt]:
+                if tok.type_id in DECISION_MAP and 1 <= tok.actor_slot <= 10:
+                    decision_labels[ti, tok.actor_slot - 1] = DECISION_MAP[tok.type_id]
+
+        # Event-window token positions (ragged).
+        window_positions = []
+        for ti, a_i in enumerate(anchor_idx):
+            nxt = anchor_idx[ti + 1] if ti + 1 < len(anchor_idx) else len(tokens)
+            window_positions.append(list(range(a_i + 1, nxt)))
 
         return {
             "static": static,
@@ -96,6 +192,11 @@ class MatchDataset(Dataset):
             "token_timestamps": token_ts,
             "labels": labels,
             "label_mask": label_mask,
+            "anchor_positions": np.array(anchor_idx, dtype=np.int64),
+            "frame_features": frame_feats,
+            "decision_labels": decision_labels,
+            "window_positions": window_positions,
+            "outcome": outcome,
         }
 
 
@@ -118,6 +219,26 @@ def collate_games(samples):
         mask[b, :L] = s["label_mask"]
         key_pad[b, :L] = False
 
+    # Anchor-windowing tensors (Plan B).
+    max_T = max(s["anchor_positions"].shape[0] for s in samples)
+    max_W = 128  # cap events per window; truncate if more
+
+    anchor_positions = torch.zeros(B, max_T, dtype=torch.long)
+    frame_features = torch.zeros(B, max_T, 10, FRAME_FEAT_DIM, dtype=torch.float32)
+    decision_labels = torch.full((B, max_T, 10), NO_DECISION, dtype=torch.long)
+    event_window_raw = torch.zeros(B, max_T, max_W, dtype=torch.long)
+    window_mask = torch.zeros(B, max_T, max_W, dtype=torch.float32)
+
+    for bi, s in enumerate(samples):
+        T = s["anchor_positions"].shape[0]
+        anchor_positions[bi, :T] = torch.from_numpy(s["anchor_positions"])
+        frame_features[bi, :T] = torch.from_numpy(s["frame_features"])
+        decision_labels[bi, :T] = torch.from_numpy(s["decision_labels"])
+        for ti, positions in enumerate(s["window_positions"]):
+            positions = positions[:max_W]
+            event_window_raw[bi, ti, :len(positions)] = torch.tensor(positions, dtype=torch.long)
+            window_mask[bi, ti, :len(positions)] = 1.0
+
     return {
         "static": torch.stack([s["static"] for s in samples]),
         "players": torch.stack([s["players"] for s in samples]),
@@ -128,6 +249,12 @@ def collate_games(samples):
         "labels": labels,
         "label_mask": mask,
         "key_pad_mask": key_pad,
+        "anchor_positions": anchor_positions,
+        "event_window_embeddings_raw": event_window_raw,
+        "window_mask": window_mask,
+        "frame_features": frame_features,
+        "decision_labels": decision_labels,
+        "outcome": torch.tensor([s["outcome"] for s in samples], dtype=torch.float32),
     }
 
 

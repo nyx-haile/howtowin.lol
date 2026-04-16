@@ -13,17 +13,21 @@ import requests
 import numpy as np
 
 from db import get_conn
+from model.patch_modes import (
+    PATCH_VECTOR_MODE_SCAFFOLDING,
+    PATCH_VECTOR_MODE_FULL,
+    DEFAULT_PATCH_VECTOR_MODE,
+)
 
 DRAGON_CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'dragon_cache')
 DDRAGON_BASE = "https://ddragon.leagueoflegends.com/cdn"
 
-# Dimension breakdown (total 256):
+# Dimension breakdown (total 1024; Plan B §A3):
 #   10 picks * 10 stat fields = 100  (base stats per champion present)
-#   Aggregated item-stat totals across all participants' final builds = 20
-#   Global constants (drake HP, baron gold, plate gold) = 10
-#   Version one-hot proxy (major, minor, point) = 3
-#   Reserved zeros for Plan A = 123
-PATCH_VECTOR_DIM = 256
+#   Aggregated item-stat totals across all items on the patch = 20
+#   Version one-hot proxy (major, minor, point) = 3 (offsets 120..122)
+#   Reserved zeros for Milestone 6 schema expansion = remainder
+PATCH_VECTOR_DIM = 1024
 
 CHAMP_STAT_FIELDS = ["hp", "hpperlevel", "mp", "mpperlevel", "armor",
                      "armorperlevel", "attackdamage", "attackdamageperlevel",
@@ -94,7 +98,7 @@ def _champ_name_by_key(champs, key):
     return None
 
 
-def patch_vector_for_match(match_id):
+def patch_vector_for_match(match_id, mode=DEFAULT_PATCH_VECTOR_MODE):
     conn = get_conn()
     try:
         game = conn.execute(
@@ -109,38 +113,32 @@ def patch_vector_for_match(match_id):
 
     vec = np.zeros(PATCH_VECTOR_DIM, dtype=np.float32)
 
-    # Picks: read from raw match via raw_db.
-    from raw_db import get_raw_match
-    match, _tl = get_raw_match(match_id)
-    offset = 0
-    if match:
-        for i, p in enumerate(match["info"]["participants"][:10]):
-            champ_key = p.get("championId")
-            champ_name = _champ_name_by_key(champs, champ_key)
-            if champ_name and champ_name in champs:
-                stats = champs[champ_name].get("stats", {})
-                for j, fname in enumerate(CHAMP_STAT_FIELDS):
-                    vec[offset + i * len(CHAMP_STAT_FIELDS) + j] = float(stats.get(fname, 0.0))
-    offset = 10 * len(CHAMP_STAT_FIELDS)  # = 100
+    if mode == PATCH_VECTOR_MODE_FULL:
+        # Champion stats per participant.
+        from raw_db import get_raw_match
+        match, _tl = get_raw_match(match_id)
+        if match:
+            for i, p in enumerate(match["info"]["participants"][:10]):
+                champ_key = p.get("championId")
+                champ_name = _champ_name_by_key(champs, champ_key)
+                if champ_name and champ_name in champs:
+                    stats = champs[champ_name].get("stats", {})
+                    for j, fname in enumerate(CHAMP_STAT_FIELDS):
+                        vec[i * len(CHAMP_STAT_FIELDS) + j] = float(stats.get(fname, 0.0))
 
-    # Patch-level item stat aggregate (match-independent). Summing over every
-    # item available on the patch is a coarse proxy for the patch's item meta —
-    # it varies with the patch, not with what any particular match bought, so
-    # it cannot leak outcomes. Reading end-of-game item slots here would be
-    # label leakage since the static vector is prefixed to the sequence.
-    item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
-    for idata in items.values():
-        stats = idata.get("stats", {})
-        for fname in ITEM_STAT_FIELDS:
-            item_totals[fname] += float(stats.get(fname, 0.0))
-    for j, fname in enumerate(ITEM_STAT_FIELDS):
-        vec[offset + j] = item_totals[fname]
-    offset += len(ITEM_STAT_FIELDS)  # = 120
+        # Patch-level item aggregate (match-independent).
+        item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
+        for idata in items.values():
+            stats = idata.get("stats", {})
+            for fname in ITEM_STAT_FIELDS:
+                item_totals[fname] += float(stats.get(fname, 0.0))
+        for j, fname in enumerate(ITEM_STAT_FIELDS):
+            vec[100 + j] = item_totals[fname]
 
-    # Version one-hot proxy.
+    # Version triple — always populated, in both modes.
     parts = version.split(".")
-    vec[offset] = float(parts[0]) if parts and parts[0].isdigit() else 0.0
-    vec[offset + 1] = float(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0.0
-    vec[offset + 2] = float(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0.0
+    vec[120] = float(parts[0]) if parts and parts[0].isdigit() else 0.0
+    vec[121] = float(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0.0
+    vec[122] = float(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0.0
 
     return vec
