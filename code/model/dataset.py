@@ -95,11 +95,19 @@ class MatchDataset(Dataset):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
         self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
+        self._cache = {}  # populated lazily; eliminates SQLite after first epoch
 
     def __len__(self):
         return len(self.match_ids)
 
     def __getitem__(self, i):
+        if i in self._cache:
+            return self._cache[i]
+        sample = self._load(i)
+        self._cache[i] = sample
+        return sample
+
+    def _load(self, i):
         mid = self.match_ids[i]
         tokens = tokenize_match(mid)
         labels, label_mask = _build_labels(tokens)

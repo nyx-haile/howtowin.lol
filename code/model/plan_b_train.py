@@ -159,9 +159,11 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
               if cold_match_ids else None
 
     device = _get_device()
+    use_amp = device.type == "cuda"
     model = PlanBModel(max_puuids=max_puuids).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    print(f"device={device}  params={sum(p.numel() for p in model.parameters()):,}")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    print(f"device={device}  amp={use_amp}  params={sum(p.numel() for p in model.parameters()):,}")
 
     history = {"train_loss": [], "game_cold_auc15": [], "player_cold_auc15": []}
     best_cold_auc = -1.0
@@ -173,7 +175,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         loader = DataLoader(train_ds, batch_size=batch_size,
                             collate_fn=collate_games, shuffle=True,
                             num_workers=4, persistent_workers=True,
-                            prefetch_factor=2,
+                            prefetch_factor=2, pin_memory=use_amp,
                             multiprocessing_context="forkserver")
         n_train_batches = len(loader)
         ep_start = time.time()
@@ -181,14 +183,17 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         n_batches = 0
         for step, batch in enumerate(loader, start=1):
             batch = _batch_to_device(batch, device)
-            out = model(batch)
-            losses = _compute_losses(out, batch)
-            aux = _rollout_aux_loss(model, out, batch)
-            loss = _combined_loss(losses, aux)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                out = model(batch)
+                losses = _compute_losses(out, batch)
+                aux = _rollout_aux_loss(model, out, batch)
+                loss = _combined_loss(losses, aux)
             opt.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             ep_loss += float(loss.item())
             n_batches += 1
             if log_every > 0 and (step == 1 or step % log_every == 0 or step == n_train_batches):
