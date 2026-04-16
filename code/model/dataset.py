@@ -25,12 +25,19 @@ SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits'
 
 
 def load_split(name):
-    """name in {'holdout', 'train'}. 'train' = all games minus holdout."""
+    """name in {'holdout', 'train', 'cold'}."""
     holdout_path = os.path.join(SPLIT_DIR, 'plan_a_holdout.txt')
     with open(holdout_path) as f:
         holdout = [line.strip() for line in f if line.strip()]
+
+    if name == 'cold':
+        from model.cold_holdout import load_player_cold_holdout
+        return sorted(load_player_cold_holdout())
+
     if name == 'holdout':
         return holdout
+
+    # 'train' — subtract both game-cold and player-cold holdouts.
     conn = get_conn()
     try:
         all_ids = [r["match_id"] for r in
@@ -38,7 +45,12 @@ def load_split(name):
     finally:
         conn.close()
     hset = set(holdout)
-    return [m for m in all_ids if m not in hset]
+    from model.cold_holdout import load_player_cold_holdout
+    try:
+        player_cold = load_player_cold_holdout()
+    except FileNotFoundError:
+        player_cold = set()
+    return [m for m in all_ids if m not in hset and m not in player_cold]
 
 
 def _build_labels(tokens):
@@ -61,9 +73,10 @@ def _build_labels(tokens):
 
 
 class MatchDataset(Dataset):
-    def __init__(self, match_ids, puuid_index=None):
+    def __init__(self, match_ids, puuid_index=None, exclude_match_ids=None):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
+        self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
 
     def __len__(self):
         return len(self.match_ids)
@@ -84,7 +97,10 @@ class MatchDataset(Dataset):
         player_ids = torch.zeros(10, dtype=torch.long)
         if match:
             for i_p, p in enumerate(match["info"]["participants"][:10]):
-                players[i_p] = torch.tensor(player_feature_vector(p["puuid"]), dtype=torch.float32)
+                players[i_p] = torch.tensor(
+                    player_feature_vector(p["puuid"], exclude_match_ids=self.exclude_match_ids),
+                    dtype=torch.float32,
+                )
                 player_ids[i_p] = self.puuid_index.get(p["puuid"], 0)
 
         return {
