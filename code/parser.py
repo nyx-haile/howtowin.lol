@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from fetch import agent
 from db import get_conn, init_db, insert_game, insert_frame, insert_player, insert_event
 from raw_db import get_raw_conn, init_raw_db, insert_raw_match
@@ -34,8 +35,15 @@ class parser(agent):
         init_raw_db()
 
     def handle_match(self, match_data=None, match_timeline=None):
-        self.match_data = match_data if match_data is not None else self.get_match_by_id(self.match)
-        self.match_timeline = match_timeline if match_timeline is not None else self.get_timeline_by_match(self.match)
+        if match_data is None and match_timeline is None:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_data = pool.submit(self.get_match_by_id, self.match)
+                fut_timeline = pool.submit(self.get_timeline_by_match, self.match)
+                self.match_data = fut_data.result()
+                self.match_timeline = fut_timeline.result()
+        else:
+            self.match_data = match_data if match_data is not None else self.get_match_by_id(self.match)
+            self.match_timeline = match_timeline if match_timeline is not None else self.get_timeline_by_match(self.match)
 
         match_id = self.match_data['metadata']['matchId']
         info = self.match_data['info']

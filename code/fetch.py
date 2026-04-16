@@ -8,6 +8,7 @@ from redis import Redis
 import redis
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor
 from db import get_conn, insert_player
 
 class agent(Redis):
@@ -70,10 +71,12 @@ class agent(Redis):
             self.get_player()
         if match_count is None:
             match_count = int(self.kwargs.get('match_count', 10))
-        matches = self.get_matches_by_puuid(self.player, count=match_count)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_matches = pool.submit(self.get_matches_by_puuid, self.player, count=match_count)
+            fut_account = pool.submit(self.get_account_by_puuid, self.player)
+            matches = fut_matches.result()
+            player_data = fut_account.result()
         self.set("log", f"Player {self.player} has {len(matches)} matches")
-        player_data = self.get_account_by_puuid(self.player)
-        self.set("log", f"Player {self.player} is {player_data}")
 
         platform = "na1"
         if matches:

@@ -10,8 +10,32 @@ import sys
 import time
 
 from db import get_conn, init_db
+from fetch import agent
 from redis_init import clear_queues, init_rate_limits
 from seed import bump_players_by_rank, seed_riot_ids, seed_top_players
+
+
+def recover_in_flight():
+    """Move items stuck in processing sets back to their queues.
+
+    When a run is interrupted, players/matches mid-processing never finish.
+    This pushes them back into the work queues so the next run picks them up.
+    """
+    r = agent.connect()
+
+    stale_players = r.smembers("player_processing")
+    if stale_players:
+        for puuid in stale_players:
+            r.zincrby("player_queue", 1, puuid)
+        r.delete("player_processing")
+        print(f"Recovered {len(stale_players)} players from stale processing state")
+
+    stale_matches = r.smembers("match_processing")
+    if stale_matches:
+        for mid in stale_matches:
+            r.zincrby("match_queue", 1, mid)
+        r.delete("match_processing")
+        print(f"Recovered {len(stale_matches)} matches from stale processing state")
 
 
 def get_game_count() -> int:
@@ -103,6 +127,7 @@ def main() -> int:
     if args.clear_queues:
         clear_queues()
     init_rate_limits()
+    recover_in_flight()
 
     riot_ids = ["chaos#oda", *args.seed_player]
     deduped_riot_ids = list(dict.fromkeys(riot_ids))

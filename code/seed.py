@@ -78,7 +78,8 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True):
                 lp = int(entry.get("leaguePoints", 0) or 0)
                 division = entry.get("rank", "I")
                 insert_player(conn, puuid, None, tier, division, lp)
-                seed.zincrby("player_queue", _tier_priority(tier, lp), puuid)
+                if not seed.sismember("player_handled", puuid):
+                    seed.zincrby("player_queue", _tier_priority(tier, lp), puuid)
                 seeded += 1
                 count += 1
 
