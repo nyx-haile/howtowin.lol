@@ -7,6 +7,7 @@ import dragon
 from redis import Redis
 import redis
 import time
+import random
 
 class agent(Redis):
     def __init__(self, *args, **kwargs):
@@ -92,34 +93,97 @@ class agent(Redis):
         pass
 
     def ratelimit(self, func, *args, **kwargs):
-        kwargs.pop("endpoint", None)
-        counter_max_short = int(self.get("cmax_short"))
-        counter_max_long = int(self.get("cmax_long"))
-        interval_short = int(self.get("interval_short"))
-        interval_long = int(self.get("interval_long"))
+        endpoint = kwargs.pop("endpoint", "GLOBAL")
+        app_prefix = "ratelimit:APP"
+        method_prefix = f"ratelimit:{endpoint}"
+
+        def load_windows(prefix, fallback):
+            windows = []
+            for wid in (1, 2):
+                cmax = int(self.get(f"{prefix}:w{wid}:cmax", 0))
+                interval = int(self.get(f"{prefix}:w{wid}:interval", 0))
+                if cmax > 0 and interval > 0:
+                    windows.append((wid, cmax, interval))
+            if windows:
+                return windows
+            return fallback
+
+        app_windows = load_windows(
+            app_prefix,
+            [
+                (1, int(self.get("cmax_short", 20)), int(self.get("interval_short", 1))),
+                (2, int(self.get("cmax_long", 100)), int(self.get("interval_long", 120))),
+            ],
+        )
+        method_windows = load_windows(
+            method_prefix,
+            [
+                (1, int(self.get(f"{method_prefix}:cmax_short", 0)), int(self.get(f"{method_prefix}:interval_short", 0))),
+                (2, int(self.get(f"{method_prefix}:cmax_long", 0)), int(self.get(f"{method_prefix}:interval_long", 0))),
+            ],
+        )
+        method_windows = [(wid, cmax, interval) for wid, cmax, interval in method_windows if cmax > 0 and interval > 0]
 
         self.ratelimitcounter += 1
         assert self.ratelimitcounter <= 10000
 
         while True:
-            short = int(self.get("counter_short"))
-            long_ = int(self.get("counter_long"))
-            if short < counter_max_short and long_ < counter_max_long:
-                self.incr("counter_short")
-                self.expire("counter_short", interval_short)
-                self.incr("counter_long")
-                self.expire("counter_long", interval_long)
+            waits = []
+
+            for wid, cmax, interval in app_windows:
+                counter_key = f"{app_prefix}:w{wid}:counter"
+                count = int(self.get(counter_key))
+                if count >= cmax:
+                    waits.append(interval / cmax)
+
+            for wid, cmax, interval in method_windows:
+                counter_key = f"{method_prefix}:w{wid}:counter"
+                count = int(self.get(counter_key))
+                if count >= cmax:
+                    waits.append(interval / cmax)
+
+            if not waits:
+                for wid, _, interval in app_windows:
+                    counter_key = f"{app_prefix}:w{wid}:counter"
+                    self.incr(counter_key)
+                    self.expire(counter_key, interval)
+                for wid, _, interval in method_windows:
+                    counter_key = f"{method_prefix}:w{wid}:counter"
+                    self.incr(counter_key)
+                    self.expire(counter_key, interval)
                 return func(*args, **kwargs)
-            wait = max(
-                (interval_long / counter_max_long) if long_ >= counter_max_long else 0,
-                (interval_short / counter_max_short) if short >= counter_max_short else 0,
-                0.2,
-            )
+
+            wait = max(max(waits), 0.2)
             time.sleep(wait)
 
 
     def request(self, url, headers, endpoint):
-        return self.ratelimit(requests.get, url, headers=headers, endpoint=endpoint)
+        backoff = 0.5
+        max_backoff = 30.0
+        max_retries = 8
+        attempt = 0
+
+        while True:
+            response = self.ratelimit(requests.get, url, headers=headers, endpoint=endpoint)
+            if response.status_code != 429:
+                return response
+
+            if attempt >= max_retries:
+                return response
+
+            retry_after = response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    delay = min(backoff * (2 ** attempt), max_backoff)
+            else:
+                delay = min(backoff * (2 ** attempt), max_backoff)
+
+            # Spread retries from concurrent workers to avoid synchronized bursts.
+            delay += random.uniform(0, min(1.0, delay * 0.25))
+            time.sleep(delay)
+            attempt += 1
 
     #Get the matches of a player by PUUID
     def get_matches_by_puuid(self, puuid, start=0, count=100):
