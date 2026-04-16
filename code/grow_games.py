@@ -11,7 +11,7 @@ import time
 
 from db import get_conn, init_db
 from redis_init import clear_queues, init_rate_limits
-from seed import seed_top_players
+from seed import bump_players_by_rank, seed_riot_ids, seed_top_players
 
 
 def get_game_count() -> int:
@@ -58,10 +58,35 @@ def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float
 
 
 def main() -> int:
+    bump_tier_plan = ["SILVER", "GOLD", "PLATINUM", "DIAMOND"]
+
     parser = argparse.ArgumentParser(description="Grow the games DB to a target count.")
     parser.add_argument("--target", type=int, default=10_000, help="Desired total games in DB (default: 10000).")
-    parser.add_argument("--seed-top", action="store_true", help="Seed challenger+grandmaster players before crawling.")
+    parser.add_argument("--seed-top", action="store_true", help="Seed challenger players across all servers before crawling.")
     parser.add_argument("--per-tier", type=int, default=50, help="Players per tier when --seed-top is used.")
+    parser.add_argument(
+        "--seed-regions",
+        type=str,
+        default=None,
+        help="Comma-separated platform regions for top seeding (default: all supported regions).",
+    )
+    parser.add_argument(
+        "--seed-player",
+        action="append",
+        default=[],
+        help="Riot ID to seed (name#tag). Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--no-grandmaster",
+        action="store_true",
+        help="Seed challenger only (skip grandmaster).",
+    )
+    parser.add_argument(
+        "--bump-limit",
+        type=int,
+        default=500,
+        help="Maximum queued players to bump per stagnation recovery step.",
+    )
     parser.add_argument("--clear-queues", action="store_true", help="Clear redis queues/tracking keys before crawling.")
     parser.add_argument("--poll-seconds", type=float, default=2.0, help="Progress bar refresh interval in seconds.")
     parser.add_argument(
@@ -78,13 +103,28 @@ def main() -> int:
     if args.clear_queues:
         clear_queues()
     init_rate_limits()
+
+    riot_ids = ["chaos#oda", *args.seed_player]
+    deduped_riot_ids = list(dict.fromkeys(riot_ids))
+    if deduped_riot_ids:
+        print(f"Seeding Riot IDs: {', '.join(deduped_riot_ids)}")
+        seed_riot_ids(deduped_riot_ids)
+
     if args.seed_top:
-        seed_top_players(per_tier=args.per_tier)
+        regions = None
+        if args.seed_regions:
+            regions = [r.strip() for r in args.seed_regions.split(",") if r.strip()]
+        seed_top_players(
+            per_tier=args.per_tier,
+            regions=regions,
+            include_grandmaster=not args.no_grandmaster,
+        )
 
     start_ts = time.time()
     start_count = get_game_count()
     current = start_count
     stagnant_runs = 0
+    bump_idx = 0
 
     print(f"Starting from {start_count} games; target={args.target}")
     render_progress(current, args.target, start_count, start_ts)
@@ -97,9 +137,19 @@ def main() -> int:
         if new_count <= current:
             stagnant_runs += 1
             if stagnant_runs >= args.max_stagnant_runs:
+                bump_tier = bump_tier_plan[min(bump_idx, len(bump_tier_plan) - 1)]
+                bumped = bump_players_by_rank(min_tier=bump_tier, limit=args.bump_limit)
+                if bump_idx < len(bump_tier_plan) - 1:
+                    bump_idx += 1
+                if bumped > 0:
+                    stagnant_runs = 0
+                    print(
+                        f"\nNo growth detected; bumped {bumped} queued players at {bump_tier}+ priority and retrying."
+                    )
+                    continue
                 print()
                 raise RuntimeError(
-                    f"No growth after {stagnant_runs} queue runs; stopped at {new_count}/{args.target}."
+                    f"No growth after {stagnant_runs} queue runs; no {bump_tier}+ players available to bump."
                 )
         else:
             stagnant_runs = 0

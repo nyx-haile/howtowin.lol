@@ -8,6 +8,7 @@ from redis import Redis
 import redis
 import time
 import random
+from db import get_conn, insert_player
 
 class agent(Redis):
     def __init__(self, *args, **kwargs):
@@ -73,6 +74,38 @@ class agent(Redis):
         self.set("log", f"Player {self.player} has {len(matches)} matches")
         player_data = self.get_account_by_puuid(self.player)
         self.set("log", f"Player {self.player} is {player_data}")
+
+        platform = "na1"
+        if matches:
+            first_match = matches[0]
+            if "_" in first_match:
+                platform = first_match.split("_", 1)[0].lower()
+
+        rank_tier = None
+        rank_division = None
+        rank_lp = None
+        summoner = self.get_summoner_by_puuid(self.player, region=platform)
+        if summoner and summoner.get("id"):
+            entries = self.get_league_entries_by_summoner(summoner["id"], region=platform)
+            if entries:
+                solo = [e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"]
+                if solo:
+                    top = max(
+                        solo,
+                        key=lambda e: (self._tier_order(e.get("tier")), int(e.get("leaguePoints", 0) or 0)),
+                    )
+                    rank_tier = top.get("tier")
+                    rank_division = top.get("rank")
+                    rank_lp = int(top.get("leaguePoints", 0) or 0)
+
+        riot_id = None
+        if player_data and player_data.get("gameName"):
+            riot_id = f"{player_data.get('gameName')}#{player_data.get('tagLine', '')}"
+        conn = get_conn()
+        insert_player(conn, self.player, riot_id, rank_tier, rank_division, rank_lp)
+        conn.commit()
+        conn.close()
+
         #incr all the matches not already handled
         self.set("log", "dumping matches")
         self.sadd(f"player_matches_{self.player}", *matches)
@@ -277,5 +310,38 @@ class agent(Redis):
         if response.status_code == 200:
             return response.json()
         return None
+
+    def get_summoner_by_puuid(self, puuid, region='na1'):
+        endpoint = "SUMMONERV4"
+        url = f"https://{region}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/{puuid}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+    def get_league_entries_by_summoner(self, summoner_id, region='na1'):
+        endpoint = "LEAGUEV4"
+        url = f"https://{region}.api.riotgames.com/lol/league/v4/entries/by-summoner/{summoner_id}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+    def _tier_order(self, tier):
+        order = {
+            "IRON": 1,
+            "BRONZE": 2,
+            "SILVER": 3,
+            "GOLD": 4,
+            "PLATINUM": 5,
+            "EMERALD": 6,
+            "DIAMOND": 7,
+            "MASTER": 8,
+            "GRANDMASTER": 9,
+            "CHALLENGER": 10,
+        }
+        return order.get((tier or "").upper(), 0)
 
 #if __name__ == "__main__":

@@ -8,6 +8,24 @@ ROLE_MAP = {
     'BOTTOM': 'BOT', 'UTILITY': 'SUP', '': 'UNK'
 }
 
+TIER_ORDER = {
+    "IRON": 1,
+    "BRONZE": 2,
+    "SILVER": 3,
+    "GOLD": 4,
+    "PLATINUM": 5,
+    "EMERALD": 6,
+    "DIAMOND": 7,
+    "MASTER": 8,
+    "GRANDMASTER": 9,
+    "CHALLENGER": 10,
+}
+
+
+def _queue_priority(rank_tier, lp):
+    tier_points = TIER_ORDER.get((rank_tier or "").upper(), 0) * 100
+    return 1 + tier_points + max(int(lp or 0), 0)
+
 
 class parser(agent):
     def __init__(self, *args, **kwargs):
@@ -66,6 +84,19 @@ class parser(agent):
                         riot_id = f"{name}#{tag}"
                     break
             insert_player(conn, pdata['puuid'], riot_id)
+
+        puuids = [p["puuid"] for p in self.participants.values()]
+        placeholders = ",".join(["?"] * len(puuids))
+        ranked_rows = conn.execute(
+            f"SELECT puuid, rank_tier, lp FROM players WHERE puuid IN ({placeholders})",
+            puuids,
+        ).fetchall()
+        rank_map = {row["puuid"]: (row["rank_tier"], row["lp"]) for row in ranked_rows}
+        for puuid in puuids:
+            if self.sismember("player_handled", puuid) or self.sismember("player_processing", puuid):
+                continue
+            rank_tier, lp = rank_map.get(puuid, (None, 0))
+            self.zincrby("player_queue", _queue_priority(rank_tier, lp), puuid)
 
         # Process timeline
         for frame in self.match_timeline['info']['frames']:
