@@ -6,8 +6,14 @@ import time
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'howtowin.db')
 
 
+def _resolve_db_path(db_path=None):
+    if db_path:
+        return db_path
+    return os.environ.get('HOWL_DB_PATH', DEFAULT_DB_PATH)
+
+
 def get_conn(db_path=None):
-    conn = sqlite3.connect(db_path or DEFAULT_DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
