@@ -71,6 +71,7 @@ def cmd_plan_b_shakedown(args):
     hist = plan_b_train_loop(train, val, cold,
                              epochs=30, batch_size=2, lr=1e-3,
                              max_puuids=500,
+                             log_every=args.log_every,
                              checkpoint_tag="plan_b_shakedown")
     best_cold = max(hist["player_cold_auc15"])
     print(f"best player_cold_auc15 = {best_cold:.3f}")
@@ -85,6 +86,7 @@ def cmd_plan_b_train(args):
     plan_b_train_loop(train, val, cold,
                       epochs=args.epochs, batch_size=args.batch_size,
                       lr=args.lr, max_puuids=args.max_puuids,
+                      log_every=args.log_every,
                       checkpoint_tag="plan_b_full")
 
 
@@ -177,12 +179,14 @@ if __name__ == "__main__":
     sub.add_parser("eval")
 
     sub.add_parser("cold-build")
-    sub.add_parser("plan-b-shakedown")
+    p_pb_sd = sub.add_parser("plan-b-shakedown")
+    p_pb_sd.add_argument("--log-every", type=int, default=10, dest="log_every")
     p_pb_tr = sub.add_parser("plan-b-train")
     p_pb_tr.add_argument("--epochs", type=int, default=30)
     p_pb_tr.add_argument("--batch-size", type=int, default=8, dest="batch_size")
     p_pb_tr.add_argument("--lr", type=float, default=3e-4)
     p_pb_tr.add_argument("--max-puuids", type=int, default=20000, dest="max_puuids")
+    p_pb_tr.add_argument("--log-every", type=int, default=10, dest="log_every")
     sub.add_parser("plan-b-eval")
 
     args = parser.parse_args()

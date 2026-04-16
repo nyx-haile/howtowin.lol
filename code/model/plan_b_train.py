@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -145,6 +146,7 @@ def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> f
 def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       epochs: int = 30, batch_size: int = 8, lr: float = 3e-4,
                       max_puuids: int = 20000,
+                      log_every: int = 10,
                       checkpoint_tag: str = "plan_b_full"):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
@@ -170,9 +172,11 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         model.train()
         loader = DataLoader(train_ds, batch_size=batch_size,
                             collate_fn=collate_games, shuffle=True)
+        n_train_batches = len(loader)
+        ep_start = time.time()
         ep_loss = 0.0
         n_batches = 0
-        for batch in loader:
+        for step, batch in enumerate(loader, start=1):
             batch = _batch_to_device(batch, device)
             out = model(batch)
             losses = _compute_losses(out, batch)
@@ -184,6 +188,14 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
             opt.step()
             ep_loss += float(loss.item())
             n_batches += 1
+            if log_every > 0 and (step == 1 or step % log_every == 0 or step == n_train_batches):
+                elapsed = time.time() - ep_start
+                avg_step = elapsed / max(step, 1)
+                eta = avg_step * max(n_train_batches - step, 0)
+                print(
+                    f"epoch {ep+1}/{epochs}  step {step}/{n_train_batches}  "
+                    f"loss={loss.item():.4f}  avg_step={avg_step:.2f}s  eta={eta:.1f}s"
+                )
         ep_loss /= max(1, n_batches)
         history["train_loss"].append(ep_loss)
 
@@ -192,7 +204,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         history["game_cold_auc15"].append(game_auc)
         history["player_cold_auc15"].append(cold_auc)
 
-        print(f"epoch {ep+1}/{epochs}  loss={ep_loss:.4f}  "
+        print(f"epoch {ep+1}/{epochs} done  loss={ep_loss:.4f}  "
               f"game_cold_auc15={game_auc:.3f}  player_cold_auc15={cold_auc:.3f}")
 
         if cold_auc > best_cold_auc + 1e-4:
