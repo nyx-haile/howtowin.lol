@@ -171,7 +171,10 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     for ep in range(epochs):
         model.train()
         loader = DataLoader(train_ds, batch_size=batch_size,
-                            collate_fn=collate_games, shuffle=True)
+                            collate_fn=collate_games, shuffle=True,
+                            num_workers=4, persistent_workers=True,
+                            prefetch_factor=2,
+                            multiprocessing_context="forkserver")
         n_train_batches = len(loader)
         ep_start = time.time()
         ep_loss = 0.0
