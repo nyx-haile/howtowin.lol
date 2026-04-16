@@ -7,8 +7,14 @@ import time
 DEFAULT_RAW_DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'raw_matches.db')
 
 
+def _resolve_raw_db_path(db_path=None):
+    if db_path:
+        return db_path
+    return os.environ.get('HOWL_RAW_DB_PATH', DEFAULT_RAW_DB_PATH)
+
+
 def get_raw_conn(db_path=None):
-    conn = sqlite3.connect(db_path or DEFAULT_RAW_DB_PATH)
+    conn = sqlite3.connect(_resolve_raw_db_path(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 

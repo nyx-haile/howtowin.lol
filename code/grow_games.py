@@ -111,6 +111,12 @@ def main() -> int:
         default=500,
         help="Maximum queued players to bump per stagnation recovery step.",
     )
+    parser.add_argument(
+        "--db-dir",
+        type=str,
+        default=None,
+        help="Write to separate DBs in this directory (for parallel growth while training reads the main DB).",
+    )
     parser.add_argument("--clear-queues", action="store_true", help="Clear redis queues/tracking keys before crawling.")
     parser.add_argument("--poll-seconds", type=float, default=2.0, help="Progress bar refresh interval in seconds.")
     parser.add_argument(
@@ -122,6 +128,13 @@ def main() -> int:
     args = parser.parse_args()
 
     code_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if args.db_dir:
+        os.makedirs(args.db_dir, exist_ok=True)
+        os.environ['HOWL_DB_PATH'] = os.path.join(args.db_dir, 'howtowin.db')
+        os.environ['HOWL_RAW_DB_PATH'] = os.path.join(args.db_dir, 'raw_matches.db')
+        print(f"Writing to separate DBs in {args.db_dir}")
+
     init_db()
 
     if args.clear_queues:
