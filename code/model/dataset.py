@@ -34,6 +34,10 @@ DECISION_MAP.pop(-1, None)  # remove sentinel if any key wasn't found
 NO_DECISION = 6
 FRAME_FEAT_DIM = 6
 
+# Per-feature normalization scales for frame features so the model sees O(1) values.
+# Order: total_gold, xp, level, pos_x, pos_y, cs
+FRAME_FEAT_SCALE = np.array([5000.0, 5000.0, 18.0, 15000.0, 15000.0, 200.0], dtype=np.float32)
+
 
 SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits')
 
@@ -140,6 +144,9 @@ class MatchDataset(Dataset):
                             float(r["level"] or 0), float(r["pos_x"] or 0),
                             float(r["pos_y"] or 0), float(r["cs"] or 0),
                         ]
+
+            # Normalize frame features to O(1) range.
+            frame_feats /= FRAME_FEAT_SCALE[np.newaxis, np.newaxis, :]
 
             # Outcome: blue team (100) win = 1, red (200) win = 0.
             game_row = conn.execute(
