@@ -1,21 +1,5 @@
 import torch
 from model.plan_b_model import PlanBModel
-from model.tokens import ANCHOR_TOKEN
-
-
-def _segment_for_test(batch, d_model=256):
-    """Create placeholder anchor-windowing tensors for testing the model
-    before the dataset (Task 9) produces them."""
-    tokens = batch["tokens"]
-    B, L = tokens.shape
-    anchor_mask = (tokens == ANCHOR_TOKEN)
-    anchor_positions = torch.where(anchor_mask[0])[0]
-    T = anchor_positions.numel()
-    max_W = 128
-    batch["anchor_positions"] = anchor_positions.unsqueeze(0).expand(B, -1)
-    batch["event_window_embeddings_raw"] = torch.zeros(B, T, max_W, dtype=torch.long)
-    batch["window_mask"] = torch.zeros(B, T, max_W)
-    batch["frame_features"] = torch.zeros(B, T, 10, 6)
 
 
 def test_forward_pass_shape(fixture_match_id):
@@ -23,7 +7,6 @@ def test_forward_pass_shape(fixture_match_id):
     idx = build_puuid_index([fixture_match_id])
     ds = MatchDataset([fixture_match_id], puuid_index=idx)
     batch = collate_games([ds[0]])
-    _segment_for_test(batch)
 
     model = PlanBModel(max_puuids=len(idx) + 1)
     out = model(batch)
@@ -43,7 +26,6 @@ def test_model_forward_is_differentiable(fixture_match_id):
     idx = build_puuid_index([fixture_match_id])
     ds = MatchDataset([fixture_match_id], puuid_index=idx)
     batch = collate_games([ds[0]])
-    _segment_for_test(batch)
 
     model = PlanBModel(max_puuids=len(idx) + 1)
     out = model(batch)
