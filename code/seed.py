@@ -1,6 +1,8 @@
+import requests
+import sys
+
 from fetch import agent
 from db import get_conn, init_db, insert_player
-import sys
 
 PLATFORM_REGIONS = [
     "br1",
@@ -14,10 +16,8 @@ PLATFORM_REGIONS = [
     "na1",
     "oc1",
     "ru",
-    "tr1",
-    "ph2",
     "sg2",
-    "th2",
+    "tr1",
     "tw2",
     "vn2",
 ]
@@ -59,7 +59,11 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True):
 
     for region in _normalize_regions(regions):
         for tier, fetch_fn in tiers:
-            league = fetch_fn(region=region)
+            try:
+                league = fetch_fn(region=region)
+            except requests.exceptions.ConnectionError as e:
+                print(f"Skipping {tier} for {region}: {e}")
+                continue
             if not league:
                 print(f"Failed to fetch {tier} league for {region}")
                 continue
