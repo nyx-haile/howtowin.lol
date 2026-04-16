@@ -8,6 +8,7 @@ top-5 eval asks whether the top-5 predicted classes cover the truth.
 Plan A uses multi-hot targets to match "top-5 of next-minute events".
 """
 import os
+from collections import OrderedDict
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -95,16 +96,20 @@ class MatchDataset(Dataset):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
         self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
-        self._cache = {}  # populated lazily; eliminates SQLite after first epoch
+        self._cache = OrderedDict()  # LRU cache; capped to avoid OOM with large corpora
+        self._cache_max = min(len(self.match_ids), 2000)  # ~2K games fits comfortably in 32GB
 
     def __len__(self):
         return len(self.match_ids)
 
     def __getitem__(self, i):
         if i in self._cache:
+            self._cache.move_to_end(i)
             return self._cache[i]
         sample = self._load(i)
         self._cache[i] = sample
+        if len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
         return sample
 
     def _load(self, i):
