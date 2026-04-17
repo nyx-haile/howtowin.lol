@@ -47,27 +47,46 @@ def get_game_count() -> int:
         conn.close()
 
 
-def render_progress(current: int, target: int, start_count: int, start_ts: float, width: int = 40) -> None:
-    target = max(target, 1)
-    ratio = min(max(current / target, 0.0), 1.0)
-    filled = int(ratio * width)
-    bar = "#" * filled + "-" * (width - filled)
-
-    elapsed = max(time.time() - start_ts, 1e-6)
-    gained = max(current - start_count, 0)
-    rate = gained / elapsed
-    remaining = max(target - current, 0)
-    eta_s = int(remaining / rate) if rate > 0 else -1
-    eta = f"{eta_s}s" if eta_s >= 0 else "?"
-
-    line = (
-        f"\r[{bar}] {current}/{target} "
-        f"({ratio * 100:5.1f}%) +{gained} @ {rate:.2f} games/s ETA {eta}"
-    )
-    print(line, end="", flush=True)
+BUCKET_S = 30
+BAR_WIDTH = 40
 
 
-def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float,
+class ProgressTracker:
+    def __init__(self, start_count: int, target: int, start_ts: float) -> None:
+        self.start_count = start_count
+        self.target = target
+        self.start_ts = start_ts
+        self._bucket_ts = start_ts
+        self._bucket_count = start_count
+        self._bucket_max = 1
+
+    def tick(self, current: int) -> None:
+        now = time.time()
+        if now - self._bucket_ts >= BUCKET_S:
+            gained = current - self._bucket_count
+            self._bucket_max = max(self._bucket_max, gained, 1)
+            elapsed_s = int(self._bucket_ts - self.start_ts)
+            ts = time.strftime('%H:%M:%S', time.localtime(self._bucket_ts))
+            bar = '█' * int(gained / self._bucket_max * BAR_WIDTH)
+            print(f'\r{ts} +{elapsed_s:5d}s  {bar:<{BAR_WIDTH}}  {gained:3d}  (total {current})')
+            self._bucket_ts = now
+            self._bucket_count = current
+        self._live(current)
+
+    def _live(self, current: int) -> None:
+        now = time.time()
+        gained_bucket = current - self._bucket_count
+        total_gained = current - self.start_count
+        rate = total_gained / max(now - self.start_ts, 1e-6)
+        eta_s = int((self.target - current) / rate) if rate > 0 else -1
+        eta = f'{eta_s}s' if eta_s >= 0 else '?'
+        bar = '█' * int(gained_bucket / self._bucket_max * BAR_WIDTH)
+        ts = time.strftime('%H:%M:%S')
+        print(f'\r{ts}   live  {bar:<{BAR_WIDTH}}  {gained_bucket:3d}  @ {rate:.2f}/s ETA {eta}',
+              end='', flush=True)
+
+
+def run_queue_once(code_dir: str, tracker: ProgressTracker,
                    poll_s: float, n_workers: int = 1) -> None:
     log_dir = os.path.join(code_dir, '..', 'data', 'worker_logs')
     os.makedirs(log_dir, exist_ok=True)
@@ -84,7 +103,7 @@ def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float
         ))
 
     while any(p.poll() is None for p in procs):
-        render_progress(get_game_count(), target, start_count, start_ts)
+        tracker.tick(get_game_count())
         time.sleep(poll_s)
 
     for lf in log_files:
@@ -199,12 +218,12 @@ def main() -> int:
     bump_idx = 0
 
     print(f"Starting from {start_count} games; target={args.target}")
-    render_progress(current, args.target, start_count, start_ts)
+    tracker = ProgressTracker(start_count, args.target, start_ts)
 
     while current < args.target:
-        run_queue_once(code_dir, args.target, start_count, start_ts, args.poll_seconds, args.workers)
+        run_queue_once(code_dir, tracker, args.poll_seconds, args.workers)
         new_count = get_game_count()
-        render_progress(new_count, args.target, start_count, start_ts)
+        tracker.tick(new_count)
 
         if new_count <= current:
             stagnant_runs += 1
