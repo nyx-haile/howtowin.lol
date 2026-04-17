@@ -39,3 +39,30 @@ def mean_entropy_at_k(
     if h.numel() == 0:
         return float("nan")
     return float(h.mean().item())
+
+
+def random_k_cohort_indices(*, Q: int, k: int, N: int, seed: int) -> torch.Tensor:
+    """(Q, k) of corpus indices sampled uniformly without per-row replacement."""
+    g = torch.Generator()
+    g.manual_seed(seed)
+    out = torch.empty(Q, k, dtype=torch.long)
+    for q in range(Q):
+        # without-replacement within a single cohort; with-replacement across queries.
+        out[q] = torch.randperm(N, generator=g)[:k]
+    return out
+
+
+def per_minute_entropy_table(
+    cohort_h: torch.Tensor,
+    query_minutes: torch.Tensor,
+    minutes,
+) -> dict[int, float]:
+    """Mean cohort entropy bucketed by query anchor minute."""
+    out = {}
+    for m in minutes:
+        mask = (query_minutes == m)
+        if mask.any():
+            out[int(m)] = float(cohort_h[mask].mean().item())
+        else:
+            out[int(m)] = float("nan")
+    return out
