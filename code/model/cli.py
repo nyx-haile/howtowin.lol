@@ -129,6 +129,190 @@ def cmd_plan_b_eval(args):
     print(f"  AUC @15 = {auc:.3f}  (target: <= 0.55)")
 
 
+def _checkpoint_sha_short(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
+
+
+def cmd_retrieval_build(args):
+    """Build the M4 retrieval index (model + optional baselines)."""
+    import torch as _t
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import (
+        build_index, save_index, DEFAULT_INDEX_PATH, INDEX_DIR,
+    )
+
+    ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
+    max_puuids = ckpt.get("max_puuids", 20000)
+    sha = _checkpoint_sha_short(ckpt_path)
+
+    train = load_split("train")
+    val = load_split("holdout")
+    cold = load_split("cold")
+    exclude = set(val) | set(cold)
+    puuid_index = build_puuid_index(train, max_puuids=max_puuids)
+
+    device = "cuda" if _t.cuda.is_available() else "cpu"
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+
+    print(f"[retrieval-build] device={device} train={len(train)} "
+          f"excluded={len(exclude)} ckpt_sha={sha}")
+    bundle = build_index(
+        model=model, train_match_ids=train,
+        exclude_match_ids=exclude, puuid_index=puuid_index,
+        device=device, checkpoint_sha=sha,
+    )
+    save_index(bundle, DEFAULT_INDEX_PATH)
+    print(f"[retrieval-build] saved {DEFAULT_INDEX_PATH} "
+          f"corpus_rows={bundle.corpus_white.shape[0]}")
+
+    if args.baselines:
+        from model.baselines.static_only_index import build_static_only_index
+        from model.baselines.frame_features_index import build_frame_features_index
+
+        so_path = os.path.join(INDEX_DIR, "plan_b_static_only_index.pt")
+        ff_path = os.path.join(INDEX_DIR, "plan_b_frame_features_index.pt")
+
+        print("[retrieval-build] static-only baseline...")
+        so_bundle = build_static_only_index(
+            model=model, train_match_ids=train,
+            exclude_match_ids=exclude, puuid_index=puuid_index,
+            device=device,
+        )
+        save_index(so_bundle, so_path)
+        print(f"[retrieval-build] saved {so_path} "
+              f"corpus_rows={so_bundle.corpus_white.shape[0]}")
+
+        print("[retrieval-build] frame-features baseline...")
+        ff_bundle = build_frame_features_index(
+            train_match_ids=train, exclude_match_ids=exclude,
+        )
+        save_index(ff_bundle, ff_path)
+        print(f"[retrieval-build] saved {ff_path} "
+              f"corpus_rows={ff_bundle.corpus_white.shape[0]}")
+
+
+def cmd_retrieval_eval(args):
+    """Run the M4 eval and write a markdown report."""
+    import torch as _t
+    from datetime import date
+
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import (
+        load_index, DEFAULT_INDEX_PATH, INDEX_DIR,
+        K_SWEEP, HEADLINE_K, HEADLINE_GATE_BITS, MID_GAME_MINUTES,
+    )
+    from model.m4_eval import run_m4_eval
+
+    ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
+    max_puuids = ckpt.get("max_puuids", 20000)
+
+    train = load_split("train")
+    val = load_split("holdout")
+    cold = load_split("cold")
+    exclude = set(val) | set(cold)
+    puuid_index = build_puuid_index(train, max_puuids=max_puuids)
+
+    device = "cuda" if _t.cuda.is_available() else "cpu"
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+
+    model_bundle = load_index(DEFAULT_INDEX_PATH)
+    so_bundle = ff_bundle = None
+    if args.baselines:
+        so_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_static_only_index.pt"))
+        ff_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_frame_features_index.pt"))
+
+    results = {}
+    for label, ids in [("game_cold", val), ("player_cold", cold)]:
+        print(f"\n=== {label.upper()} ({len(ids)} games) ===")
+        r = run_m4_eval(
+            model=model, model_bundle=model_bundle,
+            holdout_match_ids=ids, holdout_label=label,
+            puuid_index=puuid_index, exclude_match_ids=exclude,
+            k_sweep=K_SWEEP, headline_k=HEADLINE_K,
+            headline_minutes=MID_GAME_MINUTES,
+            device=device, query_batch_size=128,
+            run_baselines=args.baselines,
+            static_only_bundle=so_bundle,
+            frame_features_bundle=ff_bundle,
+        )
+        results[label] = r
+        _print_eval_result(r)
+
+    passed = (
+        results["game_cold"]["model"]["k_sweep"][HEADLINE_K] >= HEADLINE_GATE_BITS
+        and results["player_cold"]["model"]["k_sweep"][HEADLINE_K] >= HEADLINE_GATE_BITS
+    )
+    print(f"\nM4 GATE: {'PASS' if passed else 'FAIL'} "
+          f"(headline_k={HEADLINE_K}, threshold={HEADLINE_GATE_BITS} bits)")
+
+    report_dir = os.path.join(
+        os.path.dirname(__file__), "..", "..", "docs",
+    )
+    report_path = os.path.join(
+        report_dir, f"m4_retrieval_eval_report_{date.today().isoformat()}.md",
+    )
+    _write_report(report_path, results, passed)
+    print(f"[retrieval-eval] wrote report to {report_path}")
+
+
+def _print_eval_result(r: dict) -> None:
+    n_q = r["n_queries"]
+    print(f"  n_queries={n_q}")
+    print("  Source            " + "  ".join(f"k={k:>3}" for k in r["model"]["k_sweep"]))
+    for src in ("model", "static_only", "frame_features", "random"):
+        if src in r:
+            row = r[src]["k_sweep"]
+            cells = "  ".join(f"{row[k]:.3f}" for k in row)
+            print(f"  {src:<16}  {cells}")
+    print("  Per-minute entropy at headline k (model only):")
+    for m, v in sorted(r["model"]["per_minute_at_headline_k"].items()):
+        print(f"    min {m:>2}: {v:.3f}" if v == v else f"    min {m:>2}:   nan")
+
+
+def _write_report(path: str, results: dict, passed: bool) -> None:
+    from datetime import date
+    lines = [
+        "# M4 Retrieval-Check Eval Report",
+        "",
+        f"**Date:** {date.today().isoformat()}",
+        f"**Gate:** mean cohort outcome entropy ≥ 0.7 bits at k=64 on both holdouts.",
+        f"**Result:** **{'PASS' if passed else 'FAIL'}**",
+        "",
+    ]
+    for label in ("game_cold", "player_cold"):
+        r = results[label]
+        lines.append(f"## {label} (n_queries={r['n_queries']})")
+        ks = list(r["model"]["k_sweep"].keys())
+        header = "| Source | " + " | ".join(f"k={k}" for k in ks) + " |"
+        sep = "|" + "---|" * (len(ks) + 1)
+        lines += ["", header, sep]
+        for src in ("model", "static_only", "frame_features", "random"):
+            if src in r:
+                row = r[src]["k_sweep"]
+                cells = " | ".join(f"{row[k]:.3f}" for k in ks)
+                lines.append(f"| {src} | {cells} |")
+        lines.append("")
+        lines.append("### Per-minute entropy at headline k (model only)")
+        lines.append("")
+        lines.append("| Minute | Entropy (bits) |")
+        lines.append("|---:|---:|")
+        for m, v in sorted(r["model"]["per_minute_at_headline_k"].items()):
+            cell = f"{v:.3f}" if v == v else "nan"
+            lines.append(f"| {m} | {cell} |")
+        lines.append("")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+
+
 def cmd_eval():
     """M2 acceptance: top-5 >= 0.95 (stretch target) on held-out."""
     ckpt_path = os.path.join(CHECKPOINT_DIR, "baseline_full_best.pt")
@@ -189,6 +373,14 @@ if __name__ == "__main__":
     p_pb_tr.add_argument("--log-every", type=int, default=10, dest="log_every")
     sub.add_parser("plan-b-eval")
 
+    p_rb = sub.add_parser("retrieval-build")
+    p_rb.add_argument("--baselines", action="store_true",
+                      help="also build static-only and frame-features indexes")
+
+    p_re = sub.add_parser("retrieval-eval")
+    p_re.add_argument("--baselines", action="store_true",
+                      help="also evaluate baselines (requires --baselines on build)")
+
     args = parser.parse_args()
 
     if args.cmd == "shakedown":
@@ -206,3 +398,7 @@ if __name__ == "__main__":
         cmd_plan_b_train(args)
     elif args.cmd == "plan-b-eval":
         cmd_plan_b_eval(args)
+    elif args.cmd == "retrieval-build":
+        cmd_retrieval_build(args)
+    elif args.cmd == "retrieval-eval":
+        cmd_retrieval_eval(args)
