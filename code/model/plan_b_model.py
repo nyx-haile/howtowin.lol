@@ -109,10 +109,11 @@ class PlanBModel(nn.Module):
 
         post_mu_all, post_logvar_all = [], []
         prior_mu_all, prior_logvar_all = [], []
-        z_all = []
+        z_all, h_all = [], []
 
         for t in range(T):
             h = self.rssm.step(h, z, action_summary[:, t])
+            h_all.append(h)
             pr_mu, pr_lv = self.rssm.prior(h)
             po_mu, po_lv = self.rssm.posterior(h, obs[:, t])
             z = reparameterize(po_mu, po_lv)
@@ -123,6 +124,7 @@ class PlanBModel(nn.Module):
             z_all.append(z)
 
         Z = torch.stack(z_all, dim=1)                # (B, T, D_Z)
+        H = torch.stack(h_all, dim=1)                 # (B, T, D_H)
         post_mu = torch.stack(post_mu_all, dim=1)
         post_lv = torch.stack(post_logvar_all, dim=1)
         prior_mu = torch.stack(prior_mu_all, dim=1)
@@ -146,6 +148,7 @@ class PlanBModel(nn.Module):
             "post_mu": post_mu, "post_logvar": post_lv,
             "prior_mu": prior_mu, "prior_logvar": prior_lv,
             "z": Z,
+            "h": H,
             "n_anchors": T,
             "h_final": h, "z_final": z,
         }
