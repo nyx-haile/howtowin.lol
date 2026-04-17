@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 
 from db import get_conn, init_db
 from fetch import agent
@@ -48,7 +49,9 @@ def get_game_count() -> int:
 
 
 BUCKET_S = 30
-BAR_WIDTH = 40
+CHART_HEIGHT = 8
+DONE_CHAR = '█'
+LIVE_CHAR = '▒'
 
 
 class ProgressTracker:
@@ -58,32 +61,49 @@ class ProgressTracker:
         self.start_ts = start_ts
         self._bucket_ts = start_ts
         self._bucket_count = start_count
-        self._bucket_max = 1
+        self._buckets: deque[int] = deque()
+        self._drawn = False
 
     def tick(self, current: int) -> None:
         now = time.time()
         if now - self._bucket_ts >= BUCKET_S:
-            gained = current - self._bucket_count
-            self._bucket_max = max(self._bucket_max, gained, 1)
-            elapsed_s = int(self._bucket_ts - self.start_ts)
-            ts = time.strftime('%H:%M:%S', time.localtime(self._bucket_ts))
-            bar = '█' * int(gained / self._bucket_max * BAR_WIDTH)
-            print(f'\r{ts} +{elapsed_s:5d}s  {bar:<{BAR_WIDTH}}  {gained:3d}  (total {current})')
+            self._buckets.append(current - self._bucket_count)
             self._bucket_ts = now
             self._bucket_count = current
-        self._live(current)
+        self._draw(current)
 
-    def _live(self, current: int) -> None:
-        now = time.time()
-        gained_bucket = current - self._bucket_count
+    def _draw(self, current: int) -> None:
+        cols = max(shutil.get_terminal_size((80, 24)).columns - 1, 20)
+        live = current - self._bucket_count
+
+        # completed buckets (up to cols-1) + live as rightmost column
+        recent = list(self._buckets)[-(cols - 1):]
+        vals = [0] * (cols - 1 - len(recent)) + recent + [live]
+
+        max_val = max(max(vals), 1)
+        lines = []
+        for row in range(CHART_HEIGHT):
+            row_chars = []
+            for i, v in enumerate(vals):
+                bar_h = round(v / max_val * CHART_HEIGHT)
+                filled = row >= CHART_HEIGHT - bar_h
+                row_chars.append((LIVE_CHAR if i == cols - 1 else DONE_CHAR) if filled else ' ')
+            lines.append(''.join(row_chars))
+
         total_gained = current - self.start_count
-        rate = total_gained / max(now - self.start_ts, 1e-6)
+        rate = total_gained / max(time.time() - self.start_ts, 1e-6)
         eta_s = int((self.target - current) / rate) if rate > 0 else -1
         eta = f'{eta_s}s' if eta_s >= 0 else '?'
-        bar = '█' * int(gained_bucket / self._bucket_max * BAR_WIDTH)
-        ts = time.strftime('%H:%M:%S')
-        print(f'\r{ts}   live  {bar:<{BAR_WIDTH}}  {gained_bucket:3d}  @ {rate:.2f}/s ETA {eta}',
-              end='', flush=True)
+        status = (f'{time.strftime("%H:%M:%S")}  {current}/{self.target}'
+                  f'  +{live} live  {rate:.2f}/s  ETA {eta}')
+
+        if self._drawn:
+            sys.stdout.write(f'\033[{CHART_HEIGHT + 2}A')
+        for line in lines:
+            print(line)
+        print('─' * cols)
+        print(status[:cols].ljust(cols), flush=True)
+        self._drawn = True
 
 
 def run_queue_once(code_dir: str, tracker: ProgressTracker,
