@@ -91,7 +91,8 @@ class IndexBundle:
 
 
 def save_index(bundle: IndexBundle, path: str = DEFAULT_INDEX_PATH) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if dirname := os.path.dirname(path):
+        os.makedirs(dirname, exist_ok=True)
     torch.save(
         {
             "corpus_white": bundle.corpus_white,
