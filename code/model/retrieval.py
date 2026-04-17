@@ -238,3 +238,43 @@ def _build_index_inner(
         code_sha=_git_head_sha(),
         built_at=int(time.time()),
     )
+
+
+@torch.no_grad()
+def query_index(
+    bundle: IndexBundle,
+    queries_raw: torch.Tensor,
+    *,
+    k: int,
+    device: str = "cpu",
+    batch_size: int = 256,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (cohort_idx, dists) of shape (Q, k) each.
+
+    queries_raw: (Q, KEY_DIM) — raw keys, whitened internally with the
+        bundle's fitted Whitener.
+    """
+    Q = queries_raw.shape[0]
+    if Q == 0:
+        return (
+            torch.zeros(0, k, dtype=torch.long),
+            torch.zeros(0, k, dtype=torch.float32),
+        )
+
+    corpus = bundle.corpus_white.to(device)
+    mu = bundle.whitener.mu.to(device)
+    sigma = bundle.whitener.sigma.to(device)
+
+    out_idx = torch.empty(Q, k, dtype=torch.long)
+    out_d = torch.empty(Q, k, dtype=torch.float32)
+
+    for start in range(0, Q, batch_size):
+        end = min(start + batch_size, Q)
+        qb = queries_raw[start:end].to(device)
+        qb_white = (qb - mu) / sigma
+        d = torch.cdist(qb_white, corpus)        # (b, N)
+        d_top, idx_top = d.topk(k, dim=1, largest=False)
+        out_idx[start:end] = idx_top.cpu()
+        out_d[start:end] = d_top.cpu()
+
+    return out_idx, out_d

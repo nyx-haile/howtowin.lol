@@ -173,3 +173,52 @@ def test_build_index_records_per_row_metadata(fixture_match_id):
     assert bundle.row_blue_win.shape == (N,)
     # All rows share the same per-game outcome.
     assert int(bundle.row_blue_win.unique().numel()) == 1
+
+
+def test_query_index_returns_self_at_rank_one_for_corpus_rows():
+    from model.retrieval import (
+        IndexBundle, Whitener, KEY_DIM, query_index,
+    )
+    torch.manual_seed(0)
+    N = 100
+    corpus_raw = torch.randn(N, KEY_DIM)
+    w = Whitener.fit(corpus_raw)
+    bundle = IndexBundle(
+        corpus_white=w.apply(corpus_raw),
+        whitener=w,
+        row_match_id=[f"M{i}" for i in range(N)],
+        row_anchor_minute=torch.arange(N, dtype=torch.int64),
+        row_blue_win=torch.zeros(N, dtype=torch.int8),
+        checkpoint_sha="x", code_sha="y", built_at=0,
+    )
+    queries_raw = corpus_raw[:5]  # exact match against corpus rows 0..4
+    cohort_idx, _dists = query_index(bundle, queries_raw, k=3,
+                                     device="cpu", batch_size=16)
+    assert cohort_idx.shape == (5, 3)
+    # Top-1 for each query must be the matching row.
+    assert torch.equal(cohort_idx[:, 0], torch.arange(5, dtype=cohort_idx.dtype))
+
+
+def test_query_index_returns_distinct_cohorts():
+    from model.retrieval import (
+        IndexBundle, Whitener, KEY_DIM, query_index,
+    )
+    torch.manual_seed(1)
+    N = 64
+    corpus_raw = torch.randn(N, KEY_DIM)
+    w = Whitener.fit(corpus_raw)
+    bundle = IndexBundle(
+        corpus_white=w.apply(corpus_raw),
+        whitener=w,
+        row_match_id=[f"M{i}" for i in range(N)],
+        row_anchor_minute=torch.zeros(N, dtype=torch.int64),
+        row_blue_win=torch.zeros(N, dtype=torch.int8),
+        checkpoint_sha="x", code_sha="y", built_at=0,
+    )
+    q = torch.randn(8, KEY_DIM)
+    cohort_idx, dists = query_index(bundle, q, k=4, device="cpu", batch_size=4)
+    assert cohort_idx.shape == (8, 4)
+    assert dists.shape == (8, 4)
+    # Distances must be monotonically non-decreasing across the k axis.
+    diffs = dists[:, 1:] - dists[:, :-1]
+    assert (diffs >= -1e-5).all()
