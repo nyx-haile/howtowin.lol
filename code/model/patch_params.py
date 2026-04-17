@@ -98,6 +98,48 @@ def _champ_name_by_key(champs, key):
     return None
 
 
+# Module-level caches. Many matches share the same patch version, so
+# memoizing by (version, mode) avoids repeated JSON loads + aggregation.
+_shell_cache = {}   # (version, mode) -> np.ndarray with non-match-dependent slots
+_champs_cache = {}  # version -> (champs_dict, key_to_name)
+
+
+def _champ_lookup(version):
+    cached = _champs_cache.get(version)
+    if cached is not None:
+        return cached
+    champs = load_champions(version)
+    key_to_name = {str(data.get("key")): name for name, data in champs.items()}
+    _champs_cache[version] = (champs, key_to_name)
+    return champs, key_to_name
+
+
+def _shell_vector(version, mode):
+    key = (version, mode)
+    cached = _shell_cache.get(key)
+    if cached is not None:
+        return cached
+
+    vec = np.zeros(PATCH_VECTOR_DIM, dtype=np.float32)
+    if mode == PATCH_VECTOR_MODE_FULL:
+        items = load_items(version)
+        item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
+        for idata in items.values():
+            stats = idata.get("stats", {})
+            for fname in ITEM_STAT_FIELDS:
+                item_totals[fname] += float(stats.get(fname, 0.0))
+        for j, fname in enumerate(ITEM_STAT_FIELDS):
+            vec[100 + j] = item_totals[fname]
+
+    parts = version.split(".")
+    vec[120] = float(parts[0]) if parts and parts[0].isdigit() else 0.0
+    vec[121] = float(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0.0
+    vec[122] = float(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0.0
+
+    _shell_cache[key] = vec
+    return vec
+
+
 def patch_vector_for_match(match_id, mode=DEFAULT_PATCH_VECTOR_MODE):
     conn = get_conn()
     try:
@@ -108,37 +150,20 @@ def patch_vector_for_match(match_id, mode=DEFAULT_PATCH_VECTOR_MODE):
         conn.close()
 
     version = fetch_dragon_version(game["patch"] if game else "")
-    champs = load_champions(version)
-    items = load_items(version)
+    vec = _shell_vector(version, mode).copy()
 
-    vec = np.zeros(PATCH_VECTOR_DIM, dtype=np.float32)
+    if mode != PATCH_VECTOR_MODE_FULL:
+        return vec
 
-    if mode == PATCH_VECTOR_MODE_FULL:
-        # Champion stats per participant.
-        from raw_db import get_raw_match
-        match, _tl = get_raw_match(match_id)
-        if match:
-            for i, p in enumerate(match["info"]["participants"][:10]):
-                champ_key = p.get("championId")
-                champ_name = _champ_name_by_key(champs, champ_key)
-                if champ_name and champ_name in champs:
-                    stats = champs[champ_name].get("stats", {})
-                    for j, fname in enumerate(CHAMP_STAT_FIELDS):
-                        vec[i * len(CHAMP_STAT_FIELDS) + j] = float(stats.get(fname, 0.0))
-
-        # Patch-level item aggregate (match-independent).
-        item_totals = {f: 0.0 for f in ITEM_STAT_FIELDS}
-        for idata in items.values():
-            stats = idata.get("stats", {})
-            for fname in ITEM_STAT_FIELDS:
-                item_totals[fname] += float(stats.get(fname, 0.0))
-        for j, fname in enumerate(ITEM_STAT_FIELDS):
-            vec[100 + j] = item_totals[fname]
-
-    # Version triple — always populated, in both modes.
-    parts = version.split(".")
-    vec[120] = float(parts[0]) if parts and parts[0].isdigit() else 0.0
-    vec[121] = float(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0.0
-    vec[122] = float(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0.0
+    champs, key_to_name = _champ_lookup(version)
+    from raw_db import get_raw_match
+    match, _tl = get_raw_match(match_id)
+    if match:
+        for i, p in enumerate(match["info"]["participants"][:10]):
+            champ_name = key_to_name.get(str(p.get("championId")))
+            if champ_name and champ_name in champs:
+                stats = champs[champ_name].get("stats", {})
+                for j, fname in enumerate(CHAMP_STAT_FIELDS):
+                    vec[i * len(CHAMP_STAT_FIELDS) + j] = float(stats.get(fname, 0.0))
 
     return vec

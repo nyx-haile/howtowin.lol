@@ -92,12 +92,43 @@ def _build_labels(tokens):
 
 
 class MatchDataset(Dataset):
-    def __init__(self, match_ids, puuid_index=None, exclude_match_ids=None):
+    def __init__(self, match_ids, puuid_index=None, exclude_match_ids=None,
+                 cache_size=8000):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
         self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
         self._cache = OrderedDict()  # LRU cache; capped to avoid OOM with large corpora
-        self._cache_max = min(len(self.match_ids), 2000)  # ~2K games fits comfortably in 32GB
+        self._cache_max = min(len(self.match_ids), cache_size)
+        self._player_feat = self._preload_player_features()
+
+    def _preload_player_features(self):
+        """Precompute player feature vectors for every puuid in the split.
+
+        Without this, every cache-miss game load triggers 50 SQLite queries
+        (5 per player × 10 players). Precomputing once at init amortises to
+        ~5 queries per unique puuid.
+        """
+        if not self.match_ids:
+            return {}
+        conn = get_conn()
+        try:
+            puuids = set()
+            # SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; chunk the IN list.
+            chunk_size = 900
+            for i in range(0, len(self.match_ids), chunk_size):
+                chunk = self.match_ids[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT DISTINCT puuid FROM frames WHERE match_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                puuids.update(r["puuid"] for r in rows)
+        finally:
+            conn.close()
+        return {
+            puuid: player_feature_vector(puuid, exclude_match_ids=self.exclude_match_ids)
+            for puuid in puuids
+        }
 
     def __len__(self):
         return len(self.match_ids)
@@ -128,35 +159,35 @@ class MatchDataset(Dataset):
         player_ids = torch.zeros(10, dtype=torch.long)
         if match:
             for i_p, p in enumerate(match["info"]["participants"][:10]):
-                players[i_p] = torch.tensor(
-                    player_feature_vector(p["puuid"], exclude_match_ids=self.exclude_match_ids),
-                    dtype=torch.float32,
-                )
+                feat = self._player_feat.get(p["puuid"])
+                if feat is not None:
+                    players[i_p] = torch.from_numpy(feat)
                 player_ids[i_p] = self.puuid_index.get(p["puuid"], 0)
 
         # --- Plan B anchor windowing ---
         anchor_idx = [j for j, tok in enumerate(tokens) if tok.type_id == ANCHOR_TOKEN]
 
-        # Frame features per anchor from the frames table.
+        # Frame features per anchor — one query for the whole game, then pivot.
         conn = get_conn()
         try:
+            all_frame_rows = conn.execute(
+                "SELECT timestamp_ms, participant_slot, total_gold, xp, level, pos_x, pos_y, cs "
+                "FROM frames WHERE match_id = ? AND participant_slot BETWEEN 1 AND 10",
+                (mid,),
+            ).fetchall()
+            ts_to_slots = {}
+            for r in all_frame_rows:
+                ts_to_slots.setdefault(r["timestamp_ms"], {})[r["participant_slot"]] = r
+
             frame_feats = np.zeros((len(anchor_idx), 10, FRAME_FEAT_DIM), dtype=np.float32)
             for ai, a_i in enumerate(anchor_idx):
-                ts_ms = tokens[a_i].timestamp_ms
-                rows = conn.execute(
-                    "SELECT participant_slot, total_gold, xp, level, pos_x, pos_y, cs "
-                    "FROM frames WHERE match_id = ? AND timestamp_ms = ? "
-                    "ORDER BY participant_slot",
-                    (mid, ts_ms),
-                ).fetchall()
-                for r in rows:
-                    slot = r["participant_slot"]
-                    if 1 <= slot <= 10:
-                        frame_feats[ai, slot - 1] = [
-                            float(r["total_gold"] or 0), float(r["xp"] or 0),
-                            float(r["level"] or 0), float(r["pos_x"] or 0),
-                            float(r["pos_y"] or 0), float(r["cs"] or 0),
-                        ]
+                slot_map = ts_to_slots.get(tokens[a_i].timestamp_ms, {})
+                for slot, r in slot_map.items():
+                    frame_feats[ai, slot - 1] = [
+                        float(r["total_gold"] or 0), float(r["xp"] or 0),
+                        float(r["level"] or 0), float(r["pos_x"] or 0),
+                        float(r["pos_y"] or 0), float(r["cs"] or 0),
+                    ]
 
             # Normalize frame features to O(1) range.
             frame_feats /= FRAME_FEAT_SCALE[np.newaxis, np.newaxis, :]
@@ -264,12 +295,24 @@ def build_puuid_index(match_ids, max_puuids=20000):
     """
     from collections import Counter
     counts = Counter()
-    for mid in match_ids:
-        match, _ = get_raw_match(mid)
-        if not match:
-            continue
-        for p in match["info"]["participants"][:10]:
-            counts[p["puuid"]] += 1
+    match_ids = list(match_ids)
+    if not match_ids:
+        return {}
+    conn = get_conn()
+    try:
+        chunk_size = 900
+        for i in range(0, len(match_ids), chunk_size):
+            chunk = match_ids[i:i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT DISTINCT match_id, puuid FROM frames "
+                f"WHERE match_id IN ({placeholders}) AND participant_slot BETWEEN 1 AND 10",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                counts[r["puuid"]] += 1
+    finally:
+        conn.close()
     ranked = [puuid for puuid, _ in counts.most_common(max_puuids - 1)]
     return {puuid: i + 1 for i, puuid in enumerate(ranked)}
 

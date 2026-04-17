@@ -64,9 +64,8 @@ def _compute_losses(out, batch):
     losses["outcome"] = F.binary_cross_entropy_with_logits(outcome_pred, outcome_targ)
 
     dec_logits = out["decision_logits"]  # (B, T, 10, 6)
-    # Append a no-decision slot as zero-logit.
-    no_dec_col = torch.zeros(*dec_logits.shape[:-1], 1, device=dec_logits.device)
-    dec_logits_full = torch.cat([dec_logits, no_dec_col], dim=-1)  # (B, T, 10, 7)
+    # Append a no-decision slot as zero-logit (pads last dim from 6 -> 7).
+    dec_logits_full = F.pad(dec_logits, (0, 1))
     losses["next_decision"] = F.cross_entropy(
         dec_logits_full.view(-1, 7), batch["decision_labels"].view(-1).long()
     )
@@ -127,8 +126,10 @@ def _combined_loss(losses, rollout_aux):
 @torch.no_grad()
 def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
     from sklearn.metrics import roc_auc_score
+    # Eval is short and already bounded by GPU forward passes — forkserver
+    # worker startup would dominate. Keep the eval loader on the main thread.
     loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False,
-                        num_workers=2, persistent_workers=True, pin_memory=(device.type == "cuda"))
+                        num_workers=0, pin_memory=(device.type == "cuda"))
     y_true, y_score = [], []
     model.eval()
     for batch in loader:
