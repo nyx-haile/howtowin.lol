@@ -193,14 +193,22 @@ def run_queue_once(code_dir: str, tracker: ProgressTracker,
             ))
 
     while any(p.poll() is None for p in procs):
-        tracker.tick(get_game_count())
+        current = get_game_count()
+        tracker.tick(current)
+        if current >= tracker.target:
+            for p in procs:
+                if p.poll() is None:
+                    p.terminate()
+            break
         time.sleep(poll_s)
 
+    for p in procs:
+        p.wait()
     for lf in log_files:
         lf.close()
 
     failed = [(label, p.returncode) for label, p in zip(worker_labels, procs)
-              if p.returncode and p.returncode != 0]
+              if p.returncode not in (0, -15)]  # -15 = SIGTERM (our termination)
     if failed:
         for label, code in failed:
             log_path = os.path.join(log_dir, f'{label}.log')
