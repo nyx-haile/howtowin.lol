@@ -203,9 +203,9 @@ class agent(Redis):
             claimed = []
             over = None
             for key, cmax, interval in all_windows:
-                new_val = int(super(Redis, self).incr(key))
+                new_val = int(self.incr(key))
                 if new_val == 1:
-                    super(Redis, self).expire(key, interval)
+                    self.expire(key, interval)
                 claimed.append((key, new_val, cmax, interval))
                 if new_val > cmax and over is None:
                     over = (key, new_val, cmax, interval)
@@ -216,10 +216,10 @@ class agent(Redis):
 
             # We overshot at least one window; roll back all claims and sleep.
             for key, _, _, _ in claimed:
-                super(Redis, self).decr(key)
+                self.decr(key)
             key, new_val, cmax, interval = over
             # Sleep until the window likely has room — check TTL for accuracy.
-            ttl = super(Redis, self).ttl(key)
+            ttl = self.ttl(key)
             wait = max(ttl / max(new_val, 1), 0.1) if ttl > 0 else (interval / cmax)
             time.sleep(wait)
 
