@@ -257,9 +257,13 @@ class agent(Redis):
             if wid is None:
                 continue
             key = f"ratelimit:APP:{route}:w{wid}:counter"
+            # Read TTL before SET — SET strips the TTL, which would push the
+            # expiry 120s into the future on every response and stall workers.
+            ttl_remaining = self.ttl(key)
             self.set(key, count)
-            # Ensure TTL is alive; don't reset it if it's already ticking.
-            if self.ttl(key) < 0:
+            if ttl_remaining > 0:
+                self.expire(key, ttl_remaining)
+            else:
                 self.expire(key, interval)
             # Keep cmax in sync with what Riot reports.
             limit = limits.get(interval)
