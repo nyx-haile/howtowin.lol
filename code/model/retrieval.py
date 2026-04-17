@@ -6,8 +6,13 @@ tensors only — no FAISS dependency. See spec
 docs/superpowers/specs/2026-04-17-m4-retrieval-check-design.md.
 """
 import os
+import subprocess
+import time
 from dataclasses import dataclass
 import torch
+from torch.utils.data import DataLoader
+
+from model.dataset import MatchDataset, collate_games
 
 D_H = 512
 D_Z = 32
@@ -119,4 +124,99 @@ def load_index(path: str = DEFAULT_INDEX_PATH) -> IndexBundle:
         checkpoint_sha=raw["checkpoint_sha"],
         code_sha=raw["code_sha"],
         built_at=raw["built_at"],
+    )
+
+
+def _git_head_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+@torch.no_grad()
+def build_index(
+    *,
+    model,
+    train_match_ids: list[str],
+    exclude_match_ids: set[str],
+    puuid_index: dict,
+    device: str = "cpu",
+    checkpoint_sha: str = "unknown",
+    log_every: int = 100,
+) -> IndexBundle:
+    """Encode every training game's anchors, fit whitening, return bundle.
+
+    train_match_ids: candidate corpus games.
+    exclude_match_ids: subtracted from the corpus AND passed to MatchDataset
+        for player-feature-leak discipline (matches Plan B training contract).
+    """
+    model.eval()
+    model.to(device)
+
+    eligible = [m for m in train_match_ids if m not in exclude_match_ids]
+
+    rows_list: list[torch.Tensor] = []
+    minutes_list: list[torch.Tensor] = []
+    blue_win_list: list[int] = []
+    match_id_list: list[str] = []
+
+    if not eligible:
+        empty = torch.zeros(0, KEY_DIM)
+        zero_w = Whitener(mu=torch.zeros(KEY_DIM), sigma=torch.ones(KEY_DIM))
+        return IndexBundle(
+            corpus_white=empty,
+            whitener=zero_w,
+            row_match_id=[],
+            row_anchor_minute=torch.zeros(0, dtype=torch.int64),
+            row_blue_win=torch.zeros(0, dtype=torch.int8),
+            checkpoint_sha=checkpoint_sha,
+            code_sha=_git_head_sha(),
+            built_at=int(time.time()),
+        )
+
+    ds = MatchDataset(
+        eligible, puuid_index=puuid_index,
+        exclude_match_ids=exclude_match_ids,
+        cache_size=1,  # we only touch each game once
+    )
+    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
+
+    for i, batch in enumerate(loader):
+        batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+        try:
+            keys, minutes, blue_win = encode_game_keys(model, batch)
+        except Exception as e:
+            # Skip pathological games rather than aborting the whole build.
+            print(f"[build_index] skipping match {eligible[i]}: {e}")
+            continue
+        T = keys.shape[0]
+        rows_list.append(keys.cpu())
+        minutes_list.append(minutes.cpu())
+        blue_win_list.extend([int(blue_win.item())] * T)
+        match_id_list.extend([eligible[i]] * T)
+        if (i + 1) % log_every == 0:
+            print(f"[build_index] {i + 1}/{len(eligible)} games encoded")
+
+    corpus_raw = torch.cat(rows_list, dim=0) if rows_list else torch.zeros(0, KEY_DIM)
+    minutes_all = torch.cat(minutes_list, dim=0) if minutes_list else torch.zeros(0, dtype=torch.int64)
+    blue_win_all = torch.tensor(blue_win_list, dtype=torch.int8)
+
+    whitener = Whitener.fit(corpus_raw) if corpus_raw.shape[0] > 0 \
+               else Whitener(mu=torch.zeros(KEY_DIM), sigma=torch.ones(KEY_DIM))
+    corpus_white = whitener.apply(corpus_raw)
+
+    return IndexBundle(
+        corpus_white=corpus_white,
+        whitener=whitener,
+        row_match_id=match_id_list,
+        row_anchor_minute=minutes_all,
+        row_blue_win=blue_win_all,
+        checkpoint_sha=checkpoint_sha,
+        code_sha=_git_head_sha(),
+        built_at=int(time.time()),
     )

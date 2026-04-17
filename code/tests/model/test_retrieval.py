@@ -110,3 +110,66 @@ def test_index_bundle_roundtrips(tmp_path):
     assert loaded.checkpoint_sha == "deadbeef"
     assert loaded.code_sha == "cafef00d"
     assert loaded.built_at == 1700000000
+
+
+def test_build_index_excludes_holdout_match_ids(fixture_match_id):
+    from model.retrieval import build_index
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    bundle = build_index(
+        model=model,
+        train_match_ids=[fixture_match_id],
+        exclude_match_ids={fixture_match_id},
+        puuid_index=idx,
+        device="cpu",
+    )
+    # The only candidate match was excluded — corpus should be empty.
+    assert bundle.corpus_white.shape[0] == 0
+    assert bundle.row_match_id == []
+
+
+def test_build_index_corpus_is_whitened(fixture_match_id):
+    from model.retrieval import build_index, KEY_DIM
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    bundle = build_index(
+        model=model,
+        train_match_ids=[fixture_match_id],
+        exclude_match_ids=set(),
+        puuid_index=idx,
+        device="cpu",
+    )
+    N = bundle.corpus_white.shape[0]
+    assert N > 0
+    assert bundle.corpus_white.shape == (N, KEY_DIM)
+    # With one game, whitening forces every row identical → mean ~ 0.
+    assert torch.allclose(
+        bundle.corpus_white.mean(dim=0), torch.zeros(KEY_DIM), atol=1e-4
+    )
+
+
+def test_build_index_records_per_row_metadata(fixture_match_id):
+    from model.retrieval import build_index
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    bundle = build_index(
+        model=model,
+        train_match_ids=[fixture_match_id],
+        exclude_match_ids=set(),
+        puuid_index=idx,
+        device="cpu",
+    )
+    N = bundle.corpus_white.shape[0]
+    # All rows come from the one fixture match.
+    assert all(mid == fixture_match_id for mid in bundle.row_match_id)
+    assert len(bundle.row_match_id) == N
+    assert bundle.row_anchor_minute.shape == (N,)
+    assert bundle.row_blue_win.shape == (N,)
+    # All rows share the same per-game outcome.
+    assert int(bundle.row_blue_win.unique().numel()) == 1
