@@ -11,7 +11,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fetch import agent
+from fetch import agent, route_for_match
 from parser import parser
 from db import get_conn
 
@@ -40,6 +40,13 @@ def drain_players(stop_flag):
             print('[player] queue idle, exiting', flush=True)
             return
         a.player = res[1].decode('utf-8')
+        route = (a.hget('player_region', a.player) or b'americas').decode()
+        backoff = float(a.get(f'ratelimit:{route}:backoff_until') or 0)
+        wait = backoff - time.time()
+        if wait > 0:
+            a.zadd('player_queue', {a.player: float(res[2])})
+            time.sleep(min(wait, IDLE_TIMEOUT_S))
+            continue
         a.sadd('player_processing', a.player)
         t0 = time.time()
         try:
@@ -74,6 +81,13 @@ def drain_matches(stop_flag):
             print('[match] queue idle, exiting', flush=True)
             return
         p.match = res[1].decode('utf-8')
+        route = route_for_match(p.match)
+        backoff = float(p.get(f'ratelimit:{route}:backoff_until') or 0)
+        wait = backoff - time.time()
+        if wait > 0:
+            p.zadd('match_queue', {p.match: float(res[2])})
+            time.sleep(min(wait, IDLE_TIMEOUT_S))
+            continue
         p.sadd('match_processing', p.match)
         t0 = time.time()
         try:
