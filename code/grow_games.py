@@ -50,6 +50,7 @@ def get_game_count() -> int:
 
 BUCKET_S = 30
 CHART_HEIGHT = 8
+YLABEL_W = 6   # "  42 │" — 4 digits + space + bar
 DONE_CHAR = '█'
 LIVE_CHAR = '▒'
 
@@ -62,47 +63,78 @@ class ProgressTracker:
         self._bucket_ts = start_ts
         self._bucket_count = start_count
         self._buckets: deque[int] = deque()
+        self._bucket_times: deque[float] = deque()  # wall time each bucket started
         self._drawn = False
 
     def tick(self, current: int) -> None:
         now = time.time()
         if now - self._bucket_ts >= BUCKET_S:
             self._buckets.append(current - self._bucket_count)
+            self._bucket_times.append(self._bucket_ts)
             self._bucket_ts = now
             self._bucket_count = current
         self._draw(current)
 
     def _draw(self, current: int) -> None:
-        cols = max(shutil.get_terminal_size((80, 24)).columns - 1, 20)
+        term_w = max(shutil.get_terminal_size((80, 24)).columns, 30)
+        chart_cols = term_w - YLABEL_W
         live = current - self._bucket_count
 
-        # completed buckets (up to cols-1) + live as rightmost column
-        recent = list(self._buckets)[-(cols - 1):]
-        vals = [0] * (cols - 1 - len(recent)) + recent + [live]
+        recent_vals = list(self._buckets)[-(chart_cols - 1):]
+        recent_times = list(self._bucket_times)[-(chart_cols - 1):]
+        pad = chart_cols - 1 - len(recent_vals)
+        vals  = [0] * pad + recent_vals  + [live]
+        times = [None] * pad + recent_times + [self._bucket_ts]
 
         max_val = max(max(vals), 1)
+
+        def ylabel(row: int) -> str:
+            if row == 0:
+                return f'{max_val:>4} │'
+            if row == CHART_HEIGHT // 2:
+                return f'{max_val // 2:>4} │'
+            return '     │'
+
         lines = []
         for row in range(CHART_HEIGHT):
             row_chars = []
             for i, v in enumerate(vals):
                 bar_h = round(v / max_val * CHART_HEIGHT)
                 filled = row >= CHART_HEIGHT - bar_h
-                row_chars.append((LIVE_CHAR if i == cols - 1 else DONE_CHAR) if filled else ' ')
-            lines.append(''.join(row_chars))
+                row_chars.append((LIVE_CHAR if i == chart_cols - 1 else DONE_CHAR) if filled else ' ')
+            lines.append(ylabel(row) + ''.join(row_chars))
+
+        sep = '   0 └' + '─' * chart_cols
+
+        # Time axis: label every ~label_interval cols, anchored from right
+        label_interval = max(10, chart_cols // 6)
+        time_row = [' '] * term_w
+        for i in range(chart_cols - 2, -1, -label_interval):
+            t = times[i]
+            if t is None:
+                continue
+            label = time.strftime('%H:%M', time.localtime(t))
+            pos = YLABEL_W + i
+            for j, ch in enumerate(label):
+                if pos + j < term_w:
+                    time_row[pos + j] = ch
+        time_line = ''.join(time_row)
 
         total_gained = current - self.start_count
         rate = total_gained / max(time.time() - self.start_ts, 1e-6)
         eta_s = int((self.target - current) / rate) if rate > 0 else -1
         eta = f'{eta_s}s' if eta_s >= 0 else '?'
-        status = (f'{time.strftime("%H:%M:%S")}  {current}/{self.target}'
+        status = (f'      {time.strftime("%H:%M:%S")}  {current}/{self.target}'
                   f'  +{live} live  {rate:.2f}/s  ETA {eta}')
 
+        n_lines = CHART_HEIGHT + 3  # chart + sep + time axis + status
         if self._drawn:
-            sys.stdout.write(f'\033[{CHART_HEIGHT + 2}A')
+            sys.stdout.write(f'\033[{n_lines}A')
         for line in lines:
-            print(line)
-        print('─' * cols)
-        print(status[:cols].ljust(cols), flush=True)
+            print(line[:term_w])
+        print(sep[:term_w])
+        print(time_line[:term_w])
+        print(status[:term_w].ljust(term_w), flush=True)
         self._drawn = True
 
 
