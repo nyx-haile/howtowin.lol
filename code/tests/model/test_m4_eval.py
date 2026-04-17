@@ -91,3 +91,35 @@ def test_per_minute_entropy_table_groups_by_query_minute():
     assert abs(table[10] - (0.5 + 0.7) / 2) < 1e-6
     assert abs(table[15] - 0.9) < 1e-6
     assert abs(table[20] - 1.0) < 1e-6
+
+
+def test_run_m4_eval_returns_structured_result(fixture_match_id):
+    from model.m4_eval import run_m4_eval
+    from model.retrieval import build_index
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    bundle = build_index(
+        model=model, train_match_ids=[fixture_match_id],
+        exclude_match_ids=set(), puuid_index=idx, device="cpu",
+    )
+    result = run_m4_eval(
+        model=model, model_bundle=bundle,
+        holdout_match_ids=[fixture_match_id],
+        holdout_label="self_eval",
+        puuid_index=idx,
+        exclude_match_ids=set(),
+        k_sweep=(2, 4),
+        headline_k=4,
+        device="cpu",
+        run_baselines=False,
+    )
+    assert "model" in result
+    assert "k_sweep" in result["model"]
+    assert "per_minute_at_headline_k" in result["model"]
+    for k in (2, 4):
+        assert k in result["model"]["k_sweep"]
+        v = result["model"]["k_sweep"][k]
+        assert 0.0 <= v <= 1.0
