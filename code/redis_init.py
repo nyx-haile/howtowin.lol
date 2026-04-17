@@ -35,6 +35,10 @@ def init_rate_limits():
     r.set('interval_long', APP_LIMITS['w2']['interval'])
     r.delete('counter_short', 'counter_long')
 
+    # Clear any stale per-route APP counters from previous runs.
+    for key in r.scan_iter('ratelimit:APP:*:counter'):
+        r.delete(key)
+
     app_prefix = 'ratelimit:APP'
     for wid, spec in APP_LIMITS.items():
         r.set(f'{app_prefix}:{wid}:cmax', spec['cmax'])
