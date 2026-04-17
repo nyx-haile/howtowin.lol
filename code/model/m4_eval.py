@@ -16,3 +16,26 @@ def binary_entropy(p: torch.Tensor) -> torch.Tensor:
     # so this is numerically correct at both endpoints without clamping.
     h_nats = -(torch.xlogy(p, p) + torch.xlogy(1.0 - p, 1.0 - p))
     return h_nats / _LOG2
+
+
+def cohort_entropies(
+    cohort_idx: torch.Tensor, blue_win: torch.Tensor
+) -> torch.Tensor:
+    """Per-query cohort outcome entropy in bits.
+
+    cohort_idx: (Q, k) long — top-k corpus row indices per query.
+    blue_win: (N,) int8 — per-corpus-row source-game outcome.
+    Returns: (Q,) float entropies.
+    """
+    cohort_labels = blue_win[cohort_idx].float()    # (Q, k)
+    p = cohort_labels.mean(dim=1)
+    return binary_entropy(p)
+
+
+def mean_entropy_at_k(
+    cohort_idx: torch.Tensor, blue_win: torch.Tensor
+) -> float:
+    h = cohort_entropies(cohort_idx, blue_win)
+    if h.numel() == 0:
+        return float("nan")
+    return float(h.mean().item())
