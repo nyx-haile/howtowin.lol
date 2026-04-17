@@ -170,6 +170,7 @@ class agent(Redis):
             response = self.ratelimit(requests.get, url, headers=headers,
                                       endpoint=endpoint, route=route)
             if response.status_code == 200:
+                self.incr(f"stats:{route}:requests")
                 return response
             if response.status_code != 429:
                 return response

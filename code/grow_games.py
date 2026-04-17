@@ -55,6 +55,10 @@ DONE_CHAR = '█'
 LIVE_CHAR = '▒'
 
 
+ROUTES = ['americas', 'europe', 'asia', 'sea']
+ROUTE_ABBR = {'americas': 'am', 'europe': 'eu', 'asia': 'as', 'sea': 'sea'}
+
+
 class ProgressTracker:
     def __init__(self, start_count: int, target: int, start_ts: float) -> None:
         self.start_count = start_count
@@ -65,6 +69,7 @@ class ProgressTracker:
         self._buckets: deque[int] = deque()
         self._bucket_times: deque[float] = deque()  # wall time each bucket started
         self._drawn = False
+        self._redis = agent.connect()
 
     def tick(self, current: int) -> None:
         now = time.time()
@@ -137,8 +142,22 @@ class ProgressTracker:
         rate = total_gained / max(time.time() - self.start_ts, 1e-6)
         eta_s = int((self.target - current) / rate) if rate > 0 else -1
         eta = f'{eta_s}s' if eta_s >= 0 else '?'
+
+        now = time.time()
+        route_parts = []
+        for r in ROUTES:
+            reqs = int(self._redis.get(f'stats:{r}:requests') or 0)
+            if reqs == 0:
+                continue
+            backoff = float(self._redis.get(f'ratelimit:{r}:backoff_until') or 0)
+            wait = max(0.0, backoff - now)
+            suffix = f'/{int(wait)}s' if wait > 0.5 else ''
+            route_parts.append(f'{ROUTE_ABBR[r]}:{reqs}{suffix}')
+        route_str = '  '.join(route_parts)
+
         status = (f'      {time.strftime("%H:%M:%S")}  {current}/{self.target}'
-                  f'  +{live} live  {rate:.2f}/s  ETA {eta}')
+                  f'  +{live} live  {rate:.2f}/s  ETA {eta}'
+                  + (f'  │  {route_str}' if route_str else ''))
 
         n_lines = CHART_HEIGHT + 3  # chart + sep + time axis + status
         if self._drawn:
