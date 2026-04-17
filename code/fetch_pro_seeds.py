@@ -82,6 +82,7 @@ def fetch_all_players(session: requests.Session, min_rank_num: int) -> list[dict
 
 
 _ACCOUNT_RE = re.compile(r'<td><b>\[(\w+)\]</b>\s*([^<]+?)\s*</td>')
+_INACTIVE_MARKER = re.compile(r'showInactive\(\)', re.IGNORECASE)
 
 
 def fetch_accounts(session: requests.Session, name_plug: str, delay: float) -> list[dict]:
@@ -94,8 +95,14 @@ def fetch_accounts(session: requests.Session, name_plug: str, delay: float) -> l
     finally:
         time.sleep(delay)
 
+    # Truncate at the "Show Inactive" button so only active accounts are parsed.
+    html = r.text
+    m = _INACTIVE_MARKER.search(html)
+    if m:
+        html = html[:m.start()]
+
     accounts = []
-    for m in _ACCOUNT_RE.finditer(r.text):
+    for m in _ACCOUNT_RE.finditer(html):
         riot_id = m.group(2).strip()
         if "#" in riot_id:
             accounts.append({"region": m.group(1), "riot_id": riot_id})
