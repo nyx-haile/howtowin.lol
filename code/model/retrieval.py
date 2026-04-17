@@ -156,8 +156,26 @@ def build_index(
         for player-feature-leak discipline (matches Plan B training contract).
     """
     model.eval()
+    original_device = next(model.parameters()).device
     model.to(device)
+    try:
+        return _build_index_inner(
+            model=model,
+            train_match_ids=train_match_ids,
+            exclude_match_ids=exclude_match_ids,
+            puuid_index=puuid_index,
+            device=device,
+            checkpoint_sha=checkpoint_sha,
+            log_every=log_every,
+        )
+    finally:
+        model.to(original_device)
 
+
+def _build_index_inner(
+    *, model, train_match_ids, exclude_match_ids, puuid_index,
+    device, checkpoint_sha, log_every,
+) -> IndexBundle:
     eligible = [m for m in train_match_ids if m not in exclude_match_ids]
 
     rows_list: list[torch.Tensor] = []
