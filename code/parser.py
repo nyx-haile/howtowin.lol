@@ -114,7 +114,7 @@ class parser(agent):
             for event in frame['events']:
                 self._store_event(conn, match_id, event)
                 self._accumulate(event)
-            self._store_frames(conn, match_id, ts_ms, frame['participantFrames'])
+            self._store_frames(conn, match_id, ts_ms, frame.get('participantFrames') or {})
 
         conn.commit()
         conn.close()
