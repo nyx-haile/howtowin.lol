@@ -69,12 +69,17 @@ def render_progress(current: int, target: int, start_count: int, start_ts: float
 
 def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float,
                    poll_s: float, n_workers: int = 1) -> None:
+    log_dir = os.path.join(code_dir, '..', 'data', 'worker_logs')
+    os.makedirs(log_dir, exist_ok=True)
     procs = []
-    for _ in range(n_workers):
+    log_files = []
+    for i in range(n_workers):
+        lf = open(os.path.join(log_dir, f'worker_{i}.log'), 'w')
+        log_files.append(lf)
         procs.append(subprocess.Popen(
             [sys.executable, os.path.join("test", "queue_run.py")],
             cwd=code_dir,
-            stdout=subprocess.DEVNULL,
+            stdout=lf,
             stderr=subprocess.STDOUT,
         ))
 
@@ -82,9 +87,20 @@ def run_queue_once(code_dir: str, target: int, start_count: int, start_ts: float
         render_progress(get_game_count(), target, start_count, start_ts)
         time.sleep(poll_s)
 
-    for p in procs:
-        if p.returncode and p.returncode != 0:
-            raise RuntimeError(f"queue_run.py exited with code {p.returncode}")
+    for lf in log_files:
+        lf.close()
+
+    failed = [(i, p.returncode) for i, p in enumerate(procs) if p.returncode and p.returncode != 0]
+    if failed:
+        for i, code in failed:
+            log_path = os.path.join(log_dir, f'worker_{i}.log')
+            print(f"\n--- worker {i} (exit {code}) last 20 lines: {log_path} ---")
+            try:
+                lines = open(log_path).readlines()
+                print(''.join(lines[-20:]))
+            except Exception:
+                pass
+        raise RuntimeError(f"Workers failed: {failed}")
 
 
 def main() -> int:
