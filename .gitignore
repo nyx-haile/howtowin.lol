@@ -19,6 +19,7 @@ __pycache__/
 # Data artifacts (regeneratable or machine-local)
 data/dragon_cache/
 data/model_checkpoints/
+data/retrieval/
 
 # Editor / tool session state
 .claude/
