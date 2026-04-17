@@ -74,5 +74,5 @@ def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Te
     anchor_ts = ts.gather(0, anchor_pos.long()) # (T,) ms
     minutes = (anchor_ts / 60000.0).round().to(torch.int64)
 
-    blue_win = torch.tensor(int(batch["outcome"][0].item()), dtype=torch.int8)
+    blue_win = batch["outcome"][0].to(dtype=torch.int8)
     return keys, minutes, blue_win

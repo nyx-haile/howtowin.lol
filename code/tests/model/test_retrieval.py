@@ -60,6 +60,7 @@ def test_encode_game_keys_shapes(fixture_match_id):
     keys, minutes, blue_win = encode_game_keys(model, batch)
     T = batch["anchor_positions"].size(1)
     assert keys.shape == (T, KEY_DIM)
+    assert keys.dtype == torch.float32
     assert minutes.shape == (T,)
     assert minutes.dtype == torch.int64
     assert blue_win.shape == ()         # scalar tensor
