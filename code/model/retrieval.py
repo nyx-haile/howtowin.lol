@@ -76,3 +76,46 @@ def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Te
 
     blue_win = batch["outcome"][0].to(dtype=torch.int8)
     return keys, minutes, blue_win
+
+
+@dataclass
+class IndexBundle:
+    corpus_white: torch.Tensor             # (N, KEY_DIM) float32
+    whitener: Whitener
+    row_match_id: list[str]                # per-row source match_id
+    row_anchor_minute: torch.Tensor        # (N,) int64
+    row_blue_win: torch.Tensor             # (N,) int8 in {0, 1}
+    checkpoint_sha: str
+    code_sha: str
+    built_at: int                          # unix ts
+
+
+def save_index(bundle: IndexBundle, path: str = DEFAULT_INDEX_PATH) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(
+        {
+            "corpus_white": bundle.corpus_white,
+            "whitener": bundle.whitener.state_dict(),
+            "row_match_id": bundle.row_match_id,
+            "row_anchor_minute": bundle.row_anchor_minute,
+            "row_blue_win": bundle.row_blue_win,
+            "checkpoint_sha": bundle.checkpoint_sha,
+            "code_sha": bundle.code_sha,
+            "built_at": bundle.built_at,
+        },
+        path,
+    )
+
+
+def load_index(path: str = DEFAULT_INDEX_PATH) -> IndexBundle:
+    raw = torch.load(path, map_location="cpu", weights_only=False)
+    return IndexBundle(
+        corpus_white=raw["corpus_white"],
+        whitener=Whitener.from_state_dict(raw["whitener"]),
+        row_match_id=list(raw["row_match_id"]),
+        row_anchor_minute=raw["row_anchor_minute"],
+        row_blue_win=raw["row_blue_win"],
+        checkpoint_sha=raw["checkpoint_sha"],
+        code_sha=raw["code_sha"],
+        built_at=raw["built_at"],
+    )

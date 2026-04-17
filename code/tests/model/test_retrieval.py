@@ -80,3 +80,33 @@ def test_encode_game_keys_minutes_are_monotonic(fixture_match_id):
     diffs = minutes[1:] - minutes[:-1]
     assert (diffs >= 0).all(), \
         "anchor minutes must be non-decreasing"
+
+
+def test_index_bundle_roundtrips(tmp_path):
+    from model.retrieval import IndexBundle, Whitener, KEY_DIM, save_index, load_index
+    torch.manual_seed(0)
+    N = 32
+    corpus = torch.randn(N, KEY_DIM)
+    w = Whitener.fit(corpus)
+    bundle = IndexBundle(
+        corpus_white=w.apply(corpus),
+        whitener=w,
+        row_match_id=[f"M{i}" for i in range(N)],
+        row_anchor_minute=torch.arange(N, dtype=torch.int64),
+        row_blue_win=torch.zeros(N, dtype=torch.int8),
+        checkpoint_sha="deadbeef",
+        code_sha="cafef00d",
+        built_at=1700000000,
+    )
+    p = tmp_path / "idx.pt"
+    save_index(bundle, str(p))
+    loaded = load_index(str(p))
+    assert torch.equal(bundle.corpus_white, loaded.corpus_white)
+    assert torch.equal(bundle.whitener.mu, loaded.whitener.mu)
+    assert torch.equal(bundle.whitener.sigma, loaded.whitener.sigma)
+    assert bundle.row_match_id == loaded.row_match_id
+    assert torch.equal(bundle.row_anchor_minute, loaded.row_anchor_minute)
+    assert torch.equal(bundle.row_blue_win, loaded.row_blue_win)
+    assert loaded.checkpoint_sha == "deadbeef"
+    assert loaded.code_sha == "cafef00d"
+    assert loaded.built_at == 1700000000
