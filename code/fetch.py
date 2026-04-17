@@ -224,31 +224,79 @@ class agent(Redis):
             time.sleep(wait)
 
 
+    def _sync_rate_limit_headers(self, response, route):
+        """Update Redis counters from Riot's X-App-Rate-Limit-Count headers.
+
+        Riot tells us the actual usage after every response, so we stay in sync
+        even after a Redis flush or restart between runs.
+        """
+        def parse_pairs(h):
+            out = {}
+            for part in (h or "").split(","):
+                if ":" in part:
+                    a, b = part.strip().split(":", 1)
+                    try:
+                        out[int(b)] = int(a)
+                    except ValueError:
+                        pass
+            return out
+
+        counts = parse_pairs(response.headers.get("X-App-Rate-Limit-Count", ""))
+        limits = parse_pairs(response.headers.get("X-App-Rate-Limit", ""))
+        if not counts:
+            return
+
+        # Map interval → wid using our configured windows.
+        interval_to_wid = {}
+        for wid in (1, 2):
+            iv = int(self.get(f"ratelimit:APP:w{wid}:interval", 0))
+            if iv > 0:
+                interval_to_wid[iv] = wid
+
+        for interval, count in counts.items():
+            wid = interval_to_wid.get(interval)
+            if wid is None:
+                continue
+            key = f"ratelimit:APP:{route}:w{wid}:counter"
+            self.set(key, count)
+            # Ensure TTL is alive; don't reset it if it's already ticking.
+            if self.ttl(key) < 0:
+                self.expire(key, interval)
+            # Keep cmax in sync with what Riot reports.
+            limit = limits.get(interval)
+            if limit:
+                self.set(f"ratelimit:APP:w{wid}:cmax", limit)
+
     def request(self, url, headers, endpoint, route="americas"):
-        backoff = 0.5
-        max_backoff = 30.0
         max_retries = 8
         attempt = 0
 
         while True:
             response = self.ratelimit(requests.get, url, headers=headers, endpoint=endpoint, route=route)
+
+            if response.status_code == 200:
+                self._sync_rate_limit_headers(response, route)
+                return response
+
             if response.status_code != 429:
                 return response
 
             if attempt >= max_retries:
                 return response
 
-            retry_after = response.headers.get("Retry-After")
-            if retry_after is not None:
-                try:
-                    delay = float(retry_after)
-                except ValueError:
-                    delay = min(backoff * (2 ** attempt), max_backoff)
-            else:
-                delay = min(backoff * (2 ** attempt), max_backoff)
+            # Saturate our counters so other workers don't waste a request.
+            self._sync_rate_limit_headers(response, route)
 
-            # Spread retries from concurrent workers to avoid synchronized bursts.
+            retry_after = response.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 0.0
+            except ValueError:
+                delay = 0.0
+            if delay <= 0:
+                delay = min(0.5 * (2 ** attempt), 30.0)
+
             delay += random.uniform(0, min(1.0, delay * 0.25))
+            print(f"[ratelimit] 429 on {endpoint}/{route}, waiting {delay:.1f}s (attempt {attempt+1})", flush=True)
             time.sleep(delay)
             attempt += 1
 
