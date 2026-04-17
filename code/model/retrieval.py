@@ -48,3 +48,31 @@ class Whitener:
     @classmethod
     def from_state_dict(cls, sd: dict) -> "Whitener":
         return cls(mu=sd["mu"], sigma=sd["sigma"])
+
+
+@torch.no_grad()
+def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run model.forward on a single-game batch (B=1) and return:
+
+    keys:       (T, KEY_DIM) — concat of [h_t, post_mu_t] per anchor.
+    minutes:    (T,) int64 — anchor minute = round(token_timestamp / 60000).
+    blue_win:   () int8 — game-level outcome (1 if blue won, else 0).
+    """
+    assert batch["tokens"].size(0) == 1, "encode_game_keys expects B=1"
+    was_training = model.training
+    model.eval()
+    out = model(batch)
+    model.train(was_training)
+
+    T = out["n_anchors"]
+    h = out["h"][0]                # (T, D_H)
+    post_mu = out["post_mu"][0]    # (T, D_Z)
+    keys = torch.cat([h, post_mu], dim=-1)  # (T, KEY_DIM)
+
+    anchor_pos = batch["anchor_positions"][0]   # (T,)
+    ts = batch["token_timestamps"][0]           # (L,)
+    anchor_ts = ts.gather(0, anchor_pos.long()) # (T,) ms
+    minutes = (anchor_ts / 60000.0).round().to(torch.int64)
+
+    blue_win = torch.tensor(int(batch["outcome"][0].item()), dtype=torch.int8)
+    return keys, minutes, blue_win

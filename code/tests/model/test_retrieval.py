@@ -47,3 +47,35 @@ def test_whitener_roundtrips_through_state_dict():
     w2 = Whitener.from_state_dict(sd)
     assert torch.equal(w.mu, w2.mu)
     assert torch.equal(w.sigma, w2.sigma)
+
+
+def test_encode_game_keys_shapes(fixture_match_id):
+    from model.retrieval import encode_game_keys, KEY_DIM
+    from model.plan_b_model import PlanBModel
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    idx = build_puuid_index([fixture_match_id])
+    ds = MatchDataset([fixture_match_id], puuid_index=idx)
+    batch = collate_games([ds[0]])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    keys, minutes, blue_win = encode_game_keys(model, batch)
+    T = batch["anchor_positions"].size(1)
+    assert keys.shape == (T, KEY_DIM)
+    assert minutes.shape == (T,)
+    assert minutes.dtype == torch.int64
+    assert blue_win.shape == ()         # scalar tensor
+    assert blue_win.dtype == torch.int8
+    assert int(blue_win.item()) in (0, 1)
+
+
+def test_encode_game_keys_minutes_are_monotonic(fixture_match_id):
+    from model.retrieval import encode_game_keys
+    from model.plan_b_model import PlanBModel
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    idx = build_puuid_index([fixture_match_id])
+    ds = MatchDataset([fixture_match_id], puuid_index=idx)
+    batch = collate_games([ds[0]])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    _, minutes, _ = encode_game_keys(model, batch)
+    diffs = minutes[1:] - minutes[:-1]
+    assert (diffs >= 0).all(), \
+        "anchor minutes must be non-decreasing"
