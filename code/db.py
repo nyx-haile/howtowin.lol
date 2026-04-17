@@ -80,6 +80,7 @@ def init_db(db_path=None):
 
         CREATE INDEX IF NOT EXISTS idx_events_match ON events(match_id);
         CREATE INDEX IF NOT EXISTS idx_events_type ON events(match_id, event_type);
+        CREATE INDEX IF NOT EXISTS idx_frames_puuid ON frames(puuid, timestamp_ms);
 
         CREATE TABLE IF NOT EXISTS concepts (
             concept_id TEXT PRIMARY KEY,
