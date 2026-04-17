@@ -154,154 +154,34 @@ class agent(Redis):
         pass
 
     def ratelimit(self, func, *args, **kwargs):
-        endpoint = kwargs.pop("endpoint", "GLOBAL")
+        """Block until the per-route backoff clears, then fire the request."""
+        kwargs.pop("endpoint", None)
         route = kwargs.pop("route", "americas")
-        # Scope rate-limit counters per route — each Riot routing value has independent limits.
-        app_prefix = f"ratelimit:APP:{route}"
-        method_prefix = f"ratelimit:{endpoint}:{route}"
-        # Read window configs from route-agnostic keys (set by redis_init).
-        cfg_app = "ratelimit:APP"
-        cfg_method = f"ratelimit:{endpoint}"
-
-        def load_windows(cfg_prefix, fallback):
-            windows = []
-            for wid in (1, 2):
-                cmax = int(self.get(f"{cfg_prefix}:w{wid}:cmax", 0))
-                interval = int(self.get(f"{cfg_prefix}:w{wid}:interval", 0))
-                if cmax > 0 and interval > 0:
-                    windows.append((wid, cmax, interval))
-            if windows:
-                return windows
-            return fallback
-
-        app_windows = load_windows(
-            cfg_app,
-            [
-                (1, int(self.get("cmax_short", 20)), int(self.get("interval_short", 1))),
-                (2, int(self.get("cmax_long", 100)), int(self.get("interval_long", 120))),
-            ],
-        )
-        method_windows = load_windows(
-            cfg_method,
-            [
-                (1, int(self.get(f"{cfg_method}:cmax_short", 0)), int(self.get(f"{cfg_method}:interval_short", 0))),
-                (2, int(self.get(f"{cfg_method}:cmax_long", 0)), int(self.get(f"{cfg_method}:interval_long", 0))),
-            ],
-        )
-        method_windows = [(wid, cmax, interval) for wid, cmax, interval in method_windows if cmax > 0 and interval > 0]
-
-        all_windows = [(f"{app_prefix}:w{wid}:counter", cmax, interval)
-                       for wid, cmax, interval in app_windows]
-        all_windows += [(f"{method_prefix}:w{wid}:counter", cmax, interval)
-                        for wid, cmax, interval in method_windows]
-
+        key = f"ratelimit:{route}:backoff_until"
         while True:
-            # Atomically claim a slot in every window. INCR returns the new
-            # value so each worker gets a unique count — no read-then-write race.
-            # Only set TTL when the key is first created (new_val == 1) so the
-            # window expires naturally and we don't reset it on every attempt.
-            claimed = []
-            over = None
-            for key, cmax, interval in all_windows:
-                new_val = int(self.incr(key))
-                if new_val == 1:
-                    self.expire(key, interval)
-                claimed.append((key, new_val, cmax, interval))
-                if new_val > cmax and over is None:
-                    over = (key, new_val, cmax, interval)
-
-            if over is None:
+            until = float(self.get(key) or 0)
+            wait = until - time.time()
+            if wait <= 0:
                 return func(*args, **kwargs)
-
-            # We overshot at least one window; roll back all claims and sleep.
-            for key, _, _, _ in claimed:
-                self.decr(key)
-            key, new_val, cmax, interval = over
-            # Sleep until the window likely has room — check TTL for accuracy.
-            ttl = self.ttl(key)
-            wait = max(ttl / max(new_val, 1), 0.1) if ttl > 0 else (interval / cmax)
-            time.sleep(wait)
-
-
-    def _sync_rate_limit_headers(self, response, route):
-        """Update Redis counters from Riot's X-App-Rate-Limit-Count headers.
-
-        Riot tells us the actual usage after every response, so we stay in sync
-        even after a Redis flush or restart between runs.
-        """
-        def parse_pairs(h):
-            out = {}
-            for part in (h or "").split(","):
-                if ":" in part:
-                    a, b = part.strip().split(":", 1)
-                    try:
-                        out[int(b)] = int(a)
-                    except ValueError:
-                        pass
-            return out
-
-        counts = parse_pairs(response.headers.get("X-App-Rate-Limit-Count", ""))
-        limits = parse_pairs(response.headers.get("X-App-Rate-Limit", ""))
-        if not counts:
-            return
-
-        # Map interval → wid using our configured windows.
-        interval_to_wid = {}
-        for wid in (1, 2):
-            iv = int(self.get(f"ratelimit:APP:w{wid}:interval", 0))
-            if iv > 0:
-                interval_to_wid[iv] = wid
-
-        for interval, count in counts.items():
-            wid = interval_to_wid.get(interval)
-            if wid is None:
-                continue
-            key = f"ratelimit:APP:{route}:w{wid}:counter"
-            # Read TTL before SET — SET strips the TTL, which would push the
-            # expiry 120s into the future on every response and stall workers.
-            ttl_remaining = self.ttl(key)
-            self.set(key, count)
-            if ttl_remaining > 0:
-                self.expire(key, ttl_remaining)
-            else:
-                self.expire(key, interval)
-            # Keep cmax in sync with what Riot reports.
-            limit = limits.get(interval)
-            if limit:
-                self.set(f"ratelimit:APP:w{wid}:cmax", limit)
+            time.sleep(min(wait, 1.0))
 
     def request(self, url, headers, endpoint, route="americas"):
-        max_retries = 8
-        attempt = 0
-
-        while True:
-            response = self.ratelimit(requests.get, url, headers=headers, endpoint=endpoint, route=route)
-
+        for attempt in range(9):
+            response = self.ratelimit(requests.get, url, headers=headers,
+                                      endpoint=endpoint, route=route)
             if response.status_code == 200:
-                self._sync_rate_limit_headers(response, route)
                 return response
-
             if response.status_code != 429:
                 return response
 
-            if attempt >= max_retries:
-                return response
-
-            # Saturate our counters so other workers don't waste a request.
-            self._sync_rate_limit_headers(response, route)
-
-            retry_after = response.headers.get("Retry-After")
-            try:
-                delay = float(retry_after) if retry_after else 0.0
-            except ValueError:
-                delay = 0.0
-            if delay <= 0:
-                delay = min(0.5 * (2 ** attempt), 30.0)
-
-            delay += random.uniform(0, min(1.0, delay * 0.25))
-            print(f"[ratelimit] 429 on {endpoint}/{route}, waiting {delay:.1f}s (attempt {attempt+1})", flush=True)
-            time.sleep(delay)
-            attempt += 1
+            retry_after = float(response.headers.get("Retry-After") or 1)
+            wait = retry_after + random.uniform(0.1, 0.5)
+            # Broadcast backoff to all workers on this route.
+            self.set(f"ratelimit:{route}:backoff_until", time.time() + wait,
+                     ex=int(wait) + 30)
+            print(f"[429] {route} backing off {wait:.1f}s (attempt {attempt+1})", flush=True)
+            time.sleep(wait)
+        return response
 
     #Get the matches of a player by PUUID
     def get_matches_by_puuid(self, puuid, start=0, count=100, route="americas"):
