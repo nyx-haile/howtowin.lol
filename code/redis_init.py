@@ -16,17 +16,14 @@ def init_rate_limits():
 
 def clear_queues():
     r = agent.connect()
-    keys = [
-        'player_queue', 'match_queue',
-        'player_processing', 'match_processing',
-        'player_handled', 'match_handled',
-        'players', 'matches',
-    ]
-    for k in keys:
+    for k in ['player_processing', 'match_processing',
+              'player_handled', 'match_handled',
+              'player_queue', 'match_queue',
+              'players', 'matches']:
         r.delete(k)
-    # player_matches_* sets
-    for k in r.scan_iter(match='player_matches_*'):
-        r.delete(k)
+    for pattern in ('player_queue:*', 'match_queue:*', 'player_matches_*'):
+        for k in r.scan_iter(match=pattern):
+            r.delete(k)
     print('Cleared queue and tracking keys')
 
 

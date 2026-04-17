@@ -12,7 +12,7 @@ import time
 from collections import deque
 
 from db import get_conn, init_db
-from fetch import agent
+from fetch import agent, route_for_match
 from redis_init import clear_queues, init_rate_limits
 from seed import bump_players_by_rank, seed_riot_ids, seed_top_players
 
@@ -28,14 +28,16 @@ def recover_in_flight():
     stale_players = r.smembers("player_processing")
     if stale_players:
         for puuid in stale_players:
-            r.zincrby("player_queue", 1, puuid)
+            route = (r.hget("player_region", puuid) or b"americas").decode()
+            r.zincrby(f"player_queue:{route}", 1, puuid)
         r.delete("player_processing")
         print(f"Recovered {len(stale_players)} players from stale processing state")
 
     stale_matches = r.smembers("match_processing")
     if stale_matches:
         for mid in stale_matches:
-            r.zincrby("match_queue", 1, mid)
+            mid_s = mid.decode() if isinstance(mid, bytes) else mid
+            r.zincrby(f"match_queue:{route_for_match(mid_s)}", 1, mid_s)
         r.delete("match_processing")
         print(f"Recovered {len(stale_matches)} matches from stale processing state")
 
@@ -176,15 +178,19 @@ def run_queue_once(code_dir: str, tracker: ProgressTracker,
     os.makedirs(log_dir, exist_ok=True)
     procs = []
     log_files = []
-    for i in range(n_workers):
-        lf = open(os.path.join(log_dir, f'worker_{i}.log'), 'w')
-        log_files.append(lf)
-        procs.append(subprocess.Popen(
-            [sys.executable, os.path.join("test", "queue_run.py")],
-            cwd=code_dir,
-            stdout=lf,
-            stderr=subprocess.STDOUT,
-        ))
+    worker_labels = []
+    for route in ROUTES:
+        for i in range(n_workers):
+            label = f'worker_{route}_{i}'
+            lf = open(os.path.join(log_dir, f'{label}.log'), 'w')
+            log_files.append(lf)
+            worker_labels.append(label)
+            procs.append(subprocess.Popen(
+                [sys.executable, os.path.join("test", "queue_run.py"), '--route', route],
+                cwd=code_dir,
+                stdout=lf,
+                stderr=subprocess.STDOUT,
+            ))
 
     while any(p.poll() is None for p in procs):
         tracker.tick(get_game_count())
@@ -193,11 +199,12 @@ def run_queue_once(code_dir: str, tracker: ProgressTracker,
     for lf in log_files:
         lf.close()
 
-    failed = [(i, p.returncode) for i, p in enumerate(procs) if p.returncode and p.returncode != 0]
+    failed = [(label, p.returncode) for label, p in zip(worker_labels, procs)
+              if p.returncode and p.returncode != 0]
     if failed:
-        for i, code in failed:
-            log_path = os.path.join(log_dir, f'worker_{i}.log')
-            print(f"\n--- worker {i} (exit {code}) last 20 lines: {log_path} ---")
+        for label, code in failed:
+            log_path = os.path.join(log_dir, f'{label}.log')
+            print(f"\n--- {label} (exit {code}) last 20 lines: {log_path} ---")
             try:
                 lines = open(log_path).readlines()
                 print(''.join(lines[-20:]))

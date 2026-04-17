@@ -119,8 +119,9 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True, refres
         puuid = entry["puuid"]
         insert_player(conn, puuid, None, entry["tier"], entry["division"], entry["lp"])
         if not seed.sismember("player_handled", puuid):
-            seed.zincrby("player_queue", _tier_priority(entry["tier"], entry["lp"]), puuid)
-            seed.hset("player_region", puuid, route_for_platform(entry["region"]))
+            route = route_for_platform(entry["region"])
+            seed.zincrby(f"player_queue:{route}", _tier_priority(entry["tier"], entry["lp"]), puuid)
+            seed.hset("player_region", puuid, route)
         count += 1
 
     conn.commit()
@@ -133,7 +134,8 @@ def seed_single(game_name, tag_line):
     seed = agent.connect()
     account = seed.get_account_by_riot_id(game_name, tag_line)
     if account:
-        seed.zadd("player_queue", {account["puuid"]: 0})
+        seed.zadd("player_queue:americas", {account["puuid"]: 0})
+        seed.hset("player_region", account["puuid"], "americas")
         conn = get_conn()
         insert_player(conn, account["puuid"], f"{game_name}#{tag_line}")
         conn.commit()
@@ -179,7 +181,8 @@ def bump_players_by_rank(min_tier="DIAMOND", limit=500):
         puuid = row["puuid"]
         if seed.sismember("player_handled", puuid) or seed.sismember("player_processing", puuid):
             continue
-        seed.zincrby("player_queue", _tier_priority(tier, row["lp"]), puuid)
+        route = (seed.hget("player_region", puuid) or b"americas").decode()
+        seed.zincrby(f"player_queue:{route}", _tier_priority(tier, row["lp"]), puuid)
         bumped += 1
         if bumped >= limit:
             break

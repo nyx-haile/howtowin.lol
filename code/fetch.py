@@ -82,14 +82,13 @@ class agent(Redis):
         for arg in args:
             super().zincrby(key, increment, arg)
 
-    def handle_player(self, match_count=None, skip_rank=False):
+    def handle_player(self, match_count=None, skip_rank=False, route=None):
         if self.player == None:
             self.get_player()
         if match_count is None:
             match_count = int(self.kwargs.get('match_count', 10))
 
-        # Look up which route this player belongs to.
-        player_route = (self.hget("player_region", self.player) or b"americas").decode()
+        player_route = route or (self.hget("player_region", self.player) or b"americas").decode()
 
         # Only fetch match list — skip account/rank lookups to save API calls.
         matches = self.get_matches_by_puuid(self.player, count=match_count, route=player_route)
@@ -139,7 +138,7 @@ class agent(Redis):
             self.sadd(f"player_matches_{self.player}", *matches)
             new_matches = self.sdiff(f"player_matches_{self.player}", "match_handled", "match_processing")
         if new_matches:
-            self.zincrby("match_queue", 1, *new_matches)
+            self.zincrby(f"match_queue:{player_route}", 1, *new_matches)
         self.srem("player_processing", self.player)
         self.sadd("player_handled", self.player)
         self.zincrby("players", nmc, self.player)

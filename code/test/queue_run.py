@@ -1,17 +1,14 @@
-"""Option B: drive the real queue path end-to-end with a bounded runtime.
-
-Mirrors agents.py but uses timeouts on the blocking pops so we can stop once
-the queue drains.
-"""
+"""Per-route queue worker — drives player_queue:{route} and match_queue:{route}."""
 import sys
 import os
+import argparse
 import threading
 import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fetch import agent, route_for_match
+from fetch import agent
 from parser import parser
 from db import get_conn
 
@@ -21,89 +18,83 @@ MATCH_COUNT = 100
 MON_INTERVAL_S = 15
 
 
-def drain_players(stop_flag):
+def drain_players(route, stop_flag):
+    pq = f'player_queue:{route}'
     try:
         a = agent.connect()
-        print('[player] connected', flush=True)
+        print(f'[player/{route}] connected', flush=True)
     except Exception:
-        print('[player] CONNECT FAILED', flush=True)
+        print(f'[player/{route}] CONNECT FAILED', flush=True)
         traceback.print_exc()
         return
     while not stop_flag[0]:
         try:
-            res = a.bzpopmax('player_queue', timeout=IDLE_TIMEOUT_S)
+            res = a.bzpopmax(pq, timeout=IDLE_TIMEOUT_S)
         except Exception:
-            print('[player] bzpopmax exception', flush=True)
+            print(f'[player/{route}] bzpopmax exception', flush=True)
             traceback.print_exc()
             return
         if res is None:
-            print('[player] queue idle, exiting', flush=True)
+            print(f'[player/{route}] queue idle, exiting', flush=True)
             return
         a.player = res[1].decode('utf-8')
-        route = (a.hget('player_region', a.player) or b'americas').decode()
-        backoff = float(a.get(f'ratelimit:{route}:backoff_until') or 0)
-        wait = backoff - time.time()
-        if wait > 0:
-            a.zadd('player_queue', {a.player: float(res[2])})
-            time.sleep(min(wait, IDLE_TIMEOUT_S))
-            continue
         a.sadd('player_processing', a.player)
         t0 = time.time()
         try:
-            a.handle_player(match_count=MATCH_COUNT, skip_rank=True)
-            print(f'[player] done {a.player[:20]} in {time.time()-t0:.1f}s', flush=True)
+            a.handle_player(match_count=MATCH_COUNT, skip_rank=True, route=route)
+            print(f'[player/{route}] done {a.player[:20]} in {time.time()-t0:.1f}s', flush=True)
         except Exception:
-            print(f'[player] handle_player error after {time.time()-t0:.1f}s', flush=True)
+            print(f'[player/{route}] handle_player error after {time.time()-t0:.1f}s', flush=True)
             traceback.print_exc()
 
 
-def drain_matches(stop_flag):
+def drain_matches(route, stop_flag):
+    mq = f'match_queue:{route}'
     try:
         p = parser.connect()
-        print('[match] connected', flush=True)
+        print(f'[match/{route}] connected', flush=True)
     except Exception:
-        print('[match] CONNECT FAILED', flush=True)
+        print(f'[match/{route}] CONNECT FAILED', flush=True)
         traceback.print_exc()
         return
     while not stop_flag[0]:
         try:
-            res = p.bzpopmax('match_queue', timeout=IDLE_TIMEOUT_S)
+            res = p.bzpopmax(mq, timeout=IDLE_TIMEOUT_S)
         except Exception:
-            print('[match] bzpopmax exception', flush=True)
+            print(f'[match/{route}] bzpopmax exception', flush=True)
             traceback.print_exc()
             return
         if res is None:
-            pq = p.zcard('player_queue')
-            pp = p.scard('player_processing')
-            if pq > 0 or pp > 0:
-                print(f'[match] empty but players still working (pq={pq}, proc={pp}), waiting...', flush=True)
+            remaining_pq = p.zcard(f'player_queue:{route}')
+            if remaining_pq > 0:
+                print(f'[match/{route}] empty but player queue has {remaining_pq}, waiting...', flush=True)
                 continue
-            print('[match] queue idle, exiting', flush=True)
+            print(f'[match/{route}] queue idle, exiting', flush=True)
             return
         p.match = res[1].decode('utf-8')
-        route = route_for_match(p.match)
-        backoff = float(p.get(f'ratelimit:{route}:backoff_until') or 0)
-        wait = backoff - time.time()
-        if wait > 0:
-            p.zadd('match_queue', {p.match: float(res[2])})
-            time.sleep(min(wait, IDLE_TIMEOUT_S))
-            continue
         p.sadd('match_processing', p.match)
         t0 = time.time()
         try:
             p.handle_match()
             p.srem('match_processing', p.match)
             p.sadd('match_handled', p.match)
-            print(f'[match] done {p.match} in {time.time()-t0:.1f}s', flush=True)
+            print(f'[match/{route}] done {p.match} in {time.time()-t0:.1f}s', flush=True)
         except Exception:
-            print(f'[match] error on {p.match} after {time.time()-t0:.1f}s', flush=True)
+            print(f'[match/{route}] error on {p.match} after {time.time()-t0:.1f}s', flush=True)
             traceback.print_exc()
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--route', required=True,
+                    choices=['americas', 'europe', 'asia', 'sea'],
+                    help='Riot routing region this worker handles')
+    args = ap.parse_args()
+    route = args.route
+
     stop = [False]
-    t1 = threading.Thread(target=drain_players, args=(stop,), daemon=True)
-    t2 = threading.Thread(target=drain_matches, args=(stop,), daemon=True)
+    t1 = threading.Thread(target=drain_players, args=(route, stop), daemon=True)
+    t2 = threading.Thread(target=drain_matches, args=(route, stop), daemon=True)
     t1.start()
     t2.start()
 
@@ -111,25 +102,23 @@ def main():
     start = time.time()
     while time.time() - start < MAX_WALL_S:
         time.sleep(MON_INTERVAL_S)
-        pq = mon.zcard('player_queue')
-        mq = mon.zcard('match_queue')
+        pq = mon.zcard(f'player_queue:{route}')
+        mq = mon.zcard(f'match_queue:{route}')
         pp = mon.scard('player_processing')
         mp = mon.scard('match_processing')
         handled = mon.scard('match_handled')
         conn = get_conn()
         games = conn.execute('SELECT COUNT(*) FROM games').fetchone()[0]
-        frames = conn.execute('SELECT COUNT(*) FROM frames').fetchone()[0]
-        events = conn.execute('SELECT COUNT(*) FROM events').fetchone()[0]
         conn.close()
         elapsed = int(time.time() - start)
-        print(f'  [mon t={elapsed}s] pq={pq}/{pp} mq={mq}/{mp} handled={handled} | games={games} frames={frames} events={events}', flush=True)
-        if pq == 0 and mq == 0 and pp == 0 and mp == 0 and handled > 0:
-            print('[mon] drained, stopping')
+        print(f'  [mon/{route} t={elapsed}s] pq={pq}/{pp} mq={mq}/{mp} handled={handled} games={games}', flush=True)
+        if pq == 0 and mq == 0:
+            print(f'[mon/{route}] drained, stopping')
             break
 
     stop[0] = True
     time.sleep(IDLE_TIMEOUT_S + 1)
-    print('Done')
+    print(f'Done [{route}]')
 
 
 if __name__ == '__main__':

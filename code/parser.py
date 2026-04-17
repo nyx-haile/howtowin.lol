@@ -105,7 +105,7 @@ class parser(agent):
             if self.sismember("player_handled", puuid) or self.sismember("player_processing", puuid):
                 continue
             rank_tier, lp = rank_map.get(puuid, (None, 0))
-            self.zincrby("player_queue", _queue_priority(rank_tier, lp), puuid)
+            self.zincrby(f"player_queue:{match_route}", _queue_priority(rank_tier, lp), puuid)
             self.hset("player_region", puuid, match_route)
 
         # Process timeline
