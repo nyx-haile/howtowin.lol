@@ -190,35 +190,33 @@ class agent(Redis):
         )
         method_windows = [(wid, cmax, interval) for wid, cmax, interval in method_windows if cmax > 0 and interval > 0]
 
-        self.ratelimitcounter += 1
+        all_windows = [(f"{app_prefix}:w{wid}:counter", cmax, interval)
+                       for wid, cmax, interval in app_windows]
+        all_windows += [(f"{method_prefix}:w{wid}:counter", cmax, interval)
+                        for wid, cmax, interval in method_windows]
 
         while True:
-            waits = []
+            # Atomically claim a slot in every window. INCR returns the new
+            # value so each worker gets a unique count — no read-then-write race.
+            claimed = []
+            over = None
+            for key, cmax, interval in all_windows:
+                new_val = int(super(Redis, self).incr(key))
+                super(Redis, self).expire(key, interval)
+                claimed.append((key, new_val, cmax, interval))
+                if new_val > cmax and over is None:
+                    over = (key, new_val, cmax, interval)
 
-            for wid, cmax, interval in app_windows:
-                counter_key = f"{app_prefix}:w{wid}:counter"
-                count = int(self.get(counter_key))
-                if count >= cmax:
-                    waits.append(interval / cmax)
-
-            for wid, cmax, interval in method_windows:
-                counter_key = f"{method_prefix}:w{wid}:counter"
-                count = int(self.get(counter_key))
-                if count >= cmax:
-                    waits.append(interval / cmax)
-
-            if not waits:
-                for wid, _, interval in app_windows:
-                    counter_key = f"{app_prefix}:w{wid}:counter"
-                    self.incr(counter_key)
-                    self.expire(counter_key, interval)
-                for wid, _, interval in method_windows:
-                    counter_key = f"{method_prefix}:w{wid}:counter"
-                    self.incr(counter_key)
-                    self.expire(counter_key, interval)
+            if over is None:
+                # All windows have room — make the request.
                 return func(*args, **kwargs)
 
-            wait = max(max(waits), 0.2)
+            # We overshot at least one window; roll back all claims and sleep.
+            for key, _, _, _ in claimed:
+                super(Redis, self).decr(key)
+            _, new_val, cmax, interval = over
+            # Sleep proportionally to how far over we are, minimum 0.1s.
+            wait = max((interval / cmax) * (new_val - cmax + 1), 0.1)
             time.sleep(wait)
 
 
