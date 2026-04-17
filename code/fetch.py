@@ -153,25 +153,6 @@ class agent(Redis):
     def match_import(self, match_id):
         pass
 
-    # Atomically advance a per-route "next allowed fire time" by gap seconds.
-    # Returns the wall time this caller's slot starts (may be in the past = fire now).
-    # math.max(prev, now) resets the queue if it fell behind during idle periods.
-    _SMOOTH_LUA = (
-        "local prev=tonumber(redis.call('GET',KEYS[1]) or 0);"
-        "local s=math.max(prev,tonumber(ARGV[2]));"
-        "redis.call('SET',KEYS[1],tostring(s+tonumber(ARGV[1])));"
-        "redis.call('EXPIRE',KEYS[1],300);"
-        "return tostring(s)"
-    )
-
-    def _claim_rate_slot(self, route: str) -> float:
-        """Return the earliest time this request may fire; sleep until then."""
-        w2_cmax = int(self.get('ratelimit:APP:w2:cmax', 100))
-        w2_interval = int(self.get('ratelimit:APP:w2:interval', 120))
-        gap = w2_interval / max(w2_cmax, 1)  # seconds per request slot
-        key = f'ratelimit:APP:{route}:smooth'
-        return float(self.eval(self._SMOOTH_LUA, 1, key, gap, time.time()))
-
     def ratelimit(self, func, *args, **kwargs):
         endpoint = kwargs.pop("endpoint", "GLOBAL")
         route = kwargs.pop("route", "americas")
@@ -230,12 +211,6 @@ class agent(Redis):
                     over = (key, new_val, cmax, interval)
 
             if over is None:
-                # Smooth across the long window so workers don't burst the full
-                # budget in seconds then stall. Each route gets an independent slot.
-                slot_ts = self._claim_rate_slot(route)
-                gap = slot_ts - time.time()
-                if gap > 0:
-                    time.sleep(gap)
                 return func(*args, **kwargs)
 
             # We overshot at least one window; roll back all claims and sleep.

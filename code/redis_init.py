@@ -35,10 +35,8 @@ def init_rate_limits():
     r.set('interval_long', APP_LIMITS['w2']['interval'])
     r.delete('counter_short', 'counter_long')
 
-    # Clear stale per-route counters and smooth-slot schedules from previous runs.
+    # Clear stale per-route APP counters from previous runs.
     for key in r.scan_iter('ratelimit:APP:*:counter'):
-        r.delete(key)
-    for key in r.scan_iter('ratelimit:APP:*:smooth'):
         r.delete(key)
 
     app_prefix = 'ratelimit:APP'
