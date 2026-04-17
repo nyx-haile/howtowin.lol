@@ -12,3 +12,7 @@ dependencies = [
     "numpy",
     "pytest",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".venv", "venv", "build", "dist", "*.egg-info"]
