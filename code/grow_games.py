@@ -86,25 +86,38 @@ class ProgressTracker:
         vals  = [0] * pad + recent_vals  + [live]
         times = [None] * pad + recent_times + [self._bucket_ts]
 
-        max_val = max(max(vals), 1)
+        # Scale Y to the visible data range so bars fill the chart height.
+        active = [v for v in vals if v > 0]
+        if active:
+            min_val = min(active)
+            max_val = max(active)
+        else:
+            min_val, max_val = 0, 1
+        range_val = max(max_val - min_val, 1)
+
+        def bar_h(v: int) -> int:
+            if v == 0:
+                return 0
+            return 1 + round((v - min_val) / range_val * (CHART_HEIGHT - 1))
+
+        mid_val = (min_val + max_val) // 2
 
         def ylabel(row: int) -> str:
             if row == 0:
                 return f'{max_val:>4} │'
             if row == CHART_HEIGHT // 2:
-                return f'{max_val // 2:>4} │'
+                return f'{mid_val:>4} │'
             return '     │'
 
         lines = []
         for row in range(CHART_HEIGHT):
             row_chars = []
             for i, v in enumerate(vals):
-                bar_h = round(v / max_val * CHART_HEIGHT)
-                filled = row >= CHART_HEIGHT - bar_h
+                filled = row >= CHART_HEIGHT - bar_h(v)
                 row_chars.append((LIVE_CHAR if i == chart_cols - 1 else DONE_CHAR) if filled else ' ')
             lines.append(ylabel(row) + ''.join(row_chars))
 
-        sep = '   0 └' + '─' * chart_cols
+        sep = f'{min_val:>4} └' + '─' * chart_cols
 
         # Time axis: label every ~label_interval cols, anchored from right
         label_interval = max(10, chart_cols // 6)
