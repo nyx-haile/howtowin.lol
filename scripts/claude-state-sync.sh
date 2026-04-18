@@ -6,12 +6,12 @@
 #   ~/.claude/rules/                         (user global rules)
 #   ~/.claude/settings.json                  (base settings)
 #   ~/.claude/projects/<path-key>/memory/    (project auto-memory)
-#   <repo>/.beads/backup/*.jsonl             (beads issue tracker snapshot)
+#   <repo>/.beads/issues.jsonl               (beads issue tracker export)
 #
-# Beads handling:
-#   push: runs `bd backup` first so the JSONLs are current before upload.
-#   pull: restores the JSONLs into .beads/backup/, then
-#         `bd backup restore .beads/backup/` to hydrate the live Dolt DB.
+# Beads handling (bd >= 1.0):
+#   push: runs `bd export` to refresh .beads/issues.jsonl, then uploads it.
+#   pull: downloads beads/issues.jsonl, runs `bd import` to upsert into
+#         the local Dolt DB. Creates the DB with `bd init` if missing.
 #
 # The project dir on disk is path-encoded (/ and . -> -) and therefore
 # differs between machines; this script re-derives it from the current
@@ -68,13 +68,13 @@ case "$cmd" in
       say "no memory dir at $LOCAL_PROJ/memory — skipping"
     fi
     if command -v bd >/dev/null 2>&1 && [ -d "$REPO_ROOT/.beads" ]; then
-      say "refreshing beads backup (bd backup)"
-      (cd "$REPO_ROOT" && bd backup >/dev/null)
-      if [ -d "$REPO_ROOT/.beads/backup" ]; then
-        cp -r "$REPO_ROOT/.beads/backup/." "$STAGE/beads/"
-      fi
+      say "refreshing beads export (bd export)"
+      (cd "$REPO_ROOT" && bd export > "$STAGE/beads/issues.jsonl")
+    elif [ -f "$REPO_ROOT/.beads/issues.jsonl" ]; then
+      say "bd not on PATH — using existing .beads/issues.jsonl as-is"
+      cp "$REPO_ROOT/.beads/issues.jsonl" "$STAGE/beads/issues.jsonl"
     else
-      say "bd not on PATH or no .beads dir — skipping beads sync"
+      say "bd not on PATH and no .beads/issues.jsonl — skipping beads sync"
     fi
     say "staged contents:"
     (cd "$STAGE" && find . -type f | sort)
@@ -91,14 +91,25 @@ case "$cmd" in
       mkdir -p "$LOCAL_PROJ/memory"
       rsync -a "$STAGE/claude/projects/$CANON/memory/" "$LOCAL_PROJ/memory/"
     fi
-    if [ -d "$STAGE/beads" ] && [ -n "$(ls -A "$STAGE/beads" 2>/dev/null)" ]; then
-      mkdir -p "$REPO_ROOT/.beads/backup"
-      rsync -a --delete "$STAGE/beads/" "$REPO_ROOT/.beads/backup/"
+    if [ -f "$STAGE/beads/issues.jsonl" ]; then
+      mkdir -p "$REPO_ROOT/.beads"
+      cp "$STAGE/beads/issues.jsonl" "$REPO_ROOT/.beads/issues.jsonl"
       if command -v bd >/dev/null 2>&1; then
-        say "restoring beads from JSONL snapshot (bd backup restore)"
-        (cd "$REPO_ROOT" && bd backup restore .beads/backup/)
+        if ! (cd "$REPO_ROOT" && bd stats >/dev/null 2>&1); then
+          say "bd DB missing — running bd init first"
+          (cd "$REPO_ROOT" && bd init >/dev/null)
+        fi
+        say "importing issues (bd import)"
+        # bd import fails with 'nothing to commit' when the JSONL matches the
+        # current DB — that's a no-op success, not a real error.
+        import_out=$(cd "$REPO_ROOT" && bd import .beads/issues.jsonl 2>&1 || true)
+        if echo "$import_out" | grep -q "nothing to commit"; then
+          say "bd import: already up to date"
+        else
+          echo "$import_out" | grep -E "^(Imported|Error)" | head -3
+        fi
       else
-        say "JSONLs copied to .beads/backup/ but bd not on PATH — run 'bd backup restore .beads/backup/' manually"
+        say "issues.jsonl copied to .beads/ but bd not on PATH — run 'bd import .beads/issues.jsonl' manually"
       fi
     fi
     ;;
