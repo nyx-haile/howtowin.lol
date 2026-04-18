@@ -6,6 +6,12 @@
 #   ~/.claude/rules/                         (user global rules)
 #   ~/.claude/settings.json                  (base settings)
 #   ~/.claude/projects/<path-key>/memory/    (project auto-memory)
+#   <repo>/.beads/backup/*.jsonl             (beads issue tracker snapshot)
+#
+# Beads handling:
+#   push: runs `bd backup` first so the JSONLs are current before upload.
+#   pull: restores the JSONLs into .beads/backup/, then
+#         `bd backup restore .beads/backup/` to hydrate the live Dolt DB.
 #
 # The project dir on disk is path-encoded (/ and . -> -) and therefore
 # differs between machines; this script re-derives it from the current
@@ -53,13 +59,22 @@ cmd="${1:-}"
 case "$cmd" in
   push)
     say "repo=$REPO canon=$CANON local_proj=$LOCAL_PROJ"
-    mkdir -p "$STAGE/claude/rules" "$STAGE/claude/projects/$CANON"
+    mkdir -p "$STAGE/claude/rules" "$STAGE/claude/projects/$CANON" "$STAGE/beads"
     [ -d "$HOME/.claude/rules" ] && cp -r "$HOME/.claude/rules/." "$STAGE/claude/rules/"
     [ -f "$HOME/.claude/settings.json" ] && cp "$HOME/.claude/settings.json" "$STAGE/claude/settings.json"
     if [ -d "$LOCAL_PROJ/memory" ]; then
       cp -r "$LOCAL_PROJ/memory" "$STAGE/claude/projects/$CANON/memory"
     else
       say "no memory dir at $LOCAL_PROJ/memory — skipping"
+    fi
+    if command -v bd >/dev/null 2>&1 && [ -d "$REPO_ROOT/.beads" ]; then
+      say "refreshing beads backup (bd backup)"
+      (cd "$REPO_ROOT" && bd backup >/dev/null)
+      if [ -d "$REPO_ROOT/.beads/backup" ]; then
+        cp -r "$REPO_ROOT/.beads/backup/." "$STAGE/beads/"
+      fi
+    else
+      say "bd not on PATH or no .beads dir — skipping beads sync"
     fi
     say "staged contents:"
     (cd "$STAGE" && find . -type f | sort)
@@ -75,6 +90,16 @@ case "$cmd" in
     if [ -d "$STAGE/claude/projects/$CANON/memory" ]; then
       mkdir -p "$LOCAL_PROJ/memory"
       rsync -a "$STAGE/claude/projects/$CANON/memory/" "$LOCAL_PROJ/memory/"
+    fi
+    if [ -d "$STAGE/beads" ] && [ -n "$(ls -A "$STAGE/beads" 2>/dev/null)" ]; then
+      mkdir -p "$REPO_ROOT/.beads/backup"
+      rsync -a --delete "$STAGE/beads/" "$REPO_ROOT/.beads/backup/"
+      if command -v bd >/dev/null 2>&1; then
+        say "restoring beads from JSONL snapshot (bd backup restore)"
+        (cd "$REPO_ROOT" && bd backup restore .beads/backup/)
+      else
+        say "JSONLs copied to .beads/backup/ but bd not on PATH — run 'bd backup restore .beads/backup/' manually"
+      fi
     fi
     ;;
   *)
