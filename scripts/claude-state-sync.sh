@@ -19,13 +19,25 @@
 #   HOWL_STATE_REPO  (default: mer1yn/howl-agent-state)
 #   HOWL_STATE_CANON (default: basename of repo root with . -> -)
 #
-# Prereqs: `hf` CLI logged in (`hf auth login`).
+# Prereqs: `hf` CLI or `uvx hf` logged in (`hf auth login`).
 
 set -euo pipefail
 
 REPO="${HOWL_STATE_REPO:-mer1yn/howl-agent-state}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CANON="${HOWL_STATE_CANON:-$(basename "$REPO_ROOT" | tr . -)}"
+
+# Resolve the `hf` invocation: prefer a standalone binary on PATH, fall
+# back to `uvx hf` (how it's set up on the GPU host where we don't want
+# to install hf into every venv).
+if command -v hf >/dev/null 2>&1; then
+  HF=(hf)
+elif command -v uvx >/dev/null 2>&1; then
+  HF=(uvx hf)
+else
+  echo "error: neither 'hf' nor 'uvx' on PATH" >&2
+  exit 1
+fi
 
 # Path-encode the repo root the same way Claude Code does: / and . both
 # become -, leading - preserved.
@@ -51,12 +63,12 @@ case "$cmd" in
     fi
     say "staged contents:"
     (cd "$STAGE" && find . -type f | sort)
-    hf upload "$REPO" "$STAGE" --repo-type=dataset \
+    "${HF[@]}" upload "$REPO" "$STAGE" --repo-type=dataset \
       --commit-message "sync $(date -u +%FT%TZ) from $(hostname)"
     ;;
   pull)
     say "repo=$REPO canon=$CANON local_proj=$LOCAL_PROJ"
-    hf download "$REPO" --repo-type=dataset --local-dir "$STAGE" >/dev/null
+    "${HF[@]}" download "$REPO" --repo-type=dataset --local-dir "$STAGE" >/dev/null
     mkdir -p "$HOME/.claude/rules" "$LOCAL_PROJ"
     [ -d "$STAGE/claude/rules" ] && rsync -a --delete "$STAGE/claude/rules/" "$HOME/.claude/rules/"
     [ -f "$STAGE/claude/settings.json" ] && cp "$STAGE/claude/settings.json" "$HOME/.claude/settings.json"
