@@ -1,7 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "server",
+  "dolt_mode": "embedded",
   "dolt_database": "howtowin_lol",
   "project_id": "0a0a8749-c484-4d6d-8973-ea40cc0f26bd"
 }
