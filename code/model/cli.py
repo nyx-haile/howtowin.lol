@@ -313,6 +313,18 @@ def _write_report(path: str, results: dict, passed: bool) -> None:
         f.write("\n".join(lines))
 
 
+def cmd_lesson(args):
+    """Produce mistake + strength anchor candidates for one game."""
+    import json
+    from model.lesson import generate_lesson, lesson_to_dict
+
+    res = generate_lesson(
+        args.match_id, team=args.team, k=args.k,
+        index_path=args.index_path, ckpt_path=args.ckpt_path,
+    )
+    print(json.dumps(lesson_to_dict(res), indent=2))
+
+
 def cmd_eval():
     """M2 acceptance: top-5 >= 0.95 (stretch target) on held-out."""
     ckpt_path = os.path.join(CHECKPOINT_DIR, "baseline_full_best.pt")
@@ -381,6 +393,13 @@ if __name__ == "__main__":
     p_re.add_argument("--baselines", action="store_true",
                       help="also evaluate baselines (requires --baselines on build)")
 
+    p_ls = sub.add_parser("lesson", help="Generate lesson-anchor candidates for one game")
+    p_ls.add_argument("--match-id", required=True, dest="match_id")
+    p_ls.add_argument("--team", choices=("blue", "red"), default="blue")
+    p_ls.add_argument("--k", type=int, default=64)
+    p_ls.add_argument("--index-path", default=None, dest="index_path")
+    p_ls.add_argument("--ckpt-path", default=None, dest="ckpt_path")
+
     args = parser.parse_args()
 
     if args.cmd == "shakedown":
@@ -402,3 +421,5 @@ if __name__ == "__main__":
         cmd_retrieval_build(args)
     elif args.cmd == "retrieval-eval":
         cmd_retrieval_eval(args)
+    elif args.cmd == "lesson":
+        cmd_lesson(args)
