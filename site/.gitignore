@@ -16,6 +16,9 @@ Thumbs.db
 !.env.example
 !.env.test
 
+# Cloudflare
+.wrangler
+
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*

@@ -4,6 +4,10 @@
 		<a href="/">Home</a>
 		<a href="/review">Review</a>
 	</nav>
+	<div class="footer-nav">
+		<a href="/terms">Terms</a>
+		<a href="/privacy">Privacy</a>
+	</div>
 </div>
 
 <style>
@@ -11,6 +15,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
+		height: 100%;
 	}
 	.logo {
 		font-size: 1.1rem;
@@ -37,6 +42,20 @@
 		background: var(--bg-hover);
 		color: var(--text);
 	}
+	.footer-nav {
+		margin-top: auto;
+		padding-top: 12px;
+		border-top: 1px solid var(--border);
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.footer-nav a {
+		color: var(--text-muted);
+		padding: 4px 12px;
+		font-size: 0.8rem;
+	}
+	.footer-nav a:hover { color: var(--text); }
 	@media (max-width: 640px) {
 		.menu {
 			flex-direction: row;
@@ -47,6 +66,14 @@
 			flex-direction: row;
 			gap: 4px;
 			margin-top: 0;
+		}
+		.footer-nav {
+			flex-direction: row;
+			margin-top: 0;
+			padding-top: 0;
+			border-top: none;
+			border-left: 1px solid var(--border);
+			padding-left: 12px;
 		}
 	}
 </style>
