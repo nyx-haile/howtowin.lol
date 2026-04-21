@@ -53,4 +53,4 @@
 # - github.org
 # - github.repo
 
-sync.remote: "github:nyx-haile/howtowin.lol"
+sync.remote: "git+ssh://git@github.com/nyx-haile/howtowin.lol.git"
