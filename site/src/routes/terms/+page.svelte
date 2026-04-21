@@ -90,7 +90,7 @@
 	<section>
 		<h2>9. Contact</h2>
 		<p>
-			Questions or takedown requests: <a href="mailto:xyn@mit.edu">xyn@mit.edu</a>.
+			Questions or takedown requests: <a href="mailto:privacy@howtowin.lol">privacy@howtowin.lol</a>.
 		</p>
 	</section>
 </article>

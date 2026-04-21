@@ -85,7 +85,7 @@
 		<h2>7. Your rights</h2>
 		<p>
 			You can request deletion of any data associated with your Riot ID or email by
-			contacting <a href="mailto:xyn@mit.edu">xyn@mit.edu</a>. If you're covered by GDPR
+			contacting <a href="mailto:privacy@howtowin.lol">privacy@howtowin.lol</a>. If you're covered by GDPR
 			or CCPA, you additionally have rights to access, rectify, and port your data — the
 			same contact applies.
 		</p>
@@ -111,7 +111,7 @@
 	<section>
 		<h2>10. Contact</h2>
 		<p>
-			Privacy questions or deletion requests: <a href="mailto:xyn@mit.edu">xyn@mit.edu</a>.
+			Privacy questions or deletion requests: <a href="mailto:privacy@howtowin.lol">privacy@howtowin.lol</a>.
 		</p>
 	</section>
 </article>
