@@ -246,6 +246,7 @@ def query_index(
     queries_raw: torch.Tensor,
     *,
     k: int,
+    exclude_match_ids: set[str] | None = None,
     device: str = "cpu",
     batch_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -253,6 +254,10 @@ def query_index(
 
     queries_raw: (Q, KEY_DIM) — raw keys, whitened internally with the
         bundle's fitted Whitener.
+    exclude_match_ids: corpus rows whose row_match_id is in this set are
+        masked out before selecting top-k. Fetch k + |exclude| + 5 rows
+        internally so the final k remain after masking. O(k·|exclude|) per
+        query — negligible.
     """
     Q = queries_raw.shape[0]
     if Q == 0:
@@ -260,6 +265,9 @@ def query_index(
             torch.zeros(0, k, dtype=torch.long),
             torch.zeros(0, k, dtype=torch.float32),
         )
+
+    n_exclude = len(exclude_match_ids) if exclude_match_ids else 0
+    fetch_k = min(k + n_exclude + 5, len(bundle.row_match_id)) if n_exclude else k
 
     corpus = bundle.corpus_white.to(device)
     mu = bundle.whitener.mu.to(device)
@@ -272,9 +280,30 @@ def query_index(
         end = min(start + batch_size, Q)
         qb = queries_raw[start:end].to(device)
         qb_white = (qb - mu) / sigma
-        d = torch.cdist(qb_white, corpus)        # (b, N)
-        d_top, idx_top = d.topk(k, dim=1, largest=False)
-        out_idx[start:end] = idx_top.cpu()
-        out_d[start:end] = d_top.cpu()
+        d = torch.cdist(qb_white, corpus)                       # (b, N)
+        d_top, idx_top = d.topk(fetch_k, dim=1, largest=False)  # (b, fetch_k)
+
+        if exclude_match_ids:
+            idx_cpu = idx_top.cpu()
+            d_cpu = d_top.cpu()
+            for qi in range(end - start):
+                kept_idx: list[int] = []
+                kept_d: list[float] = []
+                for ci in range(fetch_k):
+                    row_i = int(idx_cpu[qi, ci].item())
+                    if bundle.row_match_id[row_i] not in exclude_match_ids:
+                        kept_idx.append(row_i)
+                        kept_d.append(float(d_cpu[qi, ci].item()))
+                        if len(kept_idx) == k:
+                            break
+                # Pad if corpus too small after exclusion.
+                while len(kept_idx) < k:
+                    kept_idx.append(kept_idx[-1] if kept_idx else 0)
+                    kept_d.append(kept_d[-1] if kept_d else 0.0)
+                out_idx[start + qi] = torch.tensor(kept_idx, dtype=torch.long)
+                out_d[start + qi] = torch.tensor(kept_d, dtype=torch.float32)
+        else:
+            out_idx[start:end] = idx_top.cpu()
+            out_d[start:end] = d_top.cpu()
 
     return out_idx, out_d

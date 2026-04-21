@@ -107,6 +107,24 @@ def test_lesson_to_dict_is_json_safe():
     assert round_tripped["mistake_anchor"] is None
 
 
+def test_query_index_excludes_match_ids():
+    """query_index with exclude_match_ids must not return excluded rows."""
+    from model.retrieval import query_index
+
+    bundle = _fake_bundle(N=200, seed=1)
+    # Mark the first 10 match IDs as excluded.
+    excluded = set(bundle.row_match_id[:10])
+
+    queries = bundle.corpus_white[:5]  # any 5 rows as queries
+    idx, _ = query_index(bundle, queries, k=20, exclude_match_ids=excluded)
+
+    # No returned row index should map to an excluded match_id.
+    for qi in range(idx.shape[0]):
+        for ci in range(idx.shape[1]):
+            mid = bundle.row_match_id[int(idx[qi, ci].item())]
+            assert mid not in excluded, f"excluded match_id {mid!r} appeared in cohort"
+
+
 @pytest.mark.skipif(
     not (os.path.exists(CKPT) and os.path.exists(INDEX)),
     reason="requires trained checkpoint + retrieval index",
@@ -134,3 +152,26 @@ def test_generate_lesson_end_to_end():
         assert 10 <= anchor.minute <= 25
         assert 0.0 <= anchor.cohort_entropy <= 1.0 + 1e-6
         assert 0.0 <= anchor.cohort_winrate <= 1.0 + 1e-6
+
+
+@pytest.mark.skipif(
+    not (os.path.exists(CKPT) and os.path.exists(INDEX)),
+    reason="requires trained checkpoint + retrieval index",
+)
+def test_generate_lesson_train_match_no_self_in_cohort():
+    """Train-set match must not appear in its own cohort after exclusion fix."""
+    from model.lesson import generate_lesson
+    from model.dataset import load_split
+
+    train_ids = load_split("train")
+    assert train_ids, "train split is empty"
+    match_id = train_ids[0]
+
+    res = generate_lesson(match_id, team="blue", k=32)
+    assert res.match_id == match_id
+
+    for anchor in (res.mistake_anchor, res.strength_anchor):
+        if anchor is not None:
+            assert match_id not in anchor.cohort_match_ids, (
+                f"target {match_id} appeared in its own cohort"
+            )

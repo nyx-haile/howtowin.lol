@@ -146,7 +146,7 @@ def generate_lesson(
             n_mid_anchors=0,
         )
 
-    cohort_idx, _ = query_index(bundle, keys, k=k, device=device)
+    cohort_idx, _ = query_index(bundle, keys, k=k, exclude_match_ids={match_id}, device=device)
     cohort_labels = bundle.row_blue_win[cohort_idx].float()  # (Q, k)
     cohort_winrate = cohort_labels.mean(dim=1)               # (Q,)
     entropy = binary_entropy(cohort_winrate)                 # (Q,)
