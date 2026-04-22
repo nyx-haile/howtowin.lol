@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a kNN retrieval layer over Plan B's `[h_t ‖ μ_q(z_t)]` latent and prove that mean cohort outcome entropy ≥ 0.7 bits at `k=64` on both holdouts (game-cold, player-cold), restricted to mid-game anchors (minutes 10–25).
+**Goal:** Build a kNN retrieval layer over Plan B's `[h_t ‖ μ_q(z_t)]` latent, clear the necessary entropy gate (`mean cohort outcome entropy ≥ 0.7 bits` at `k=64` on both holdouts), and interpret that result against baselines so we know whether retrieval is actually state-sensitive rather than just loose or proxy-driven.
 
 **Architecture:** Reuse Plan B's trained checkpoint and `MatchDataset` unchanged. Add a `retrieval.py` module that runs the model over training games, extracts `[h_t ‖ μ_q(z_t)]` per anchor, fits per-dim whitening, and saves a single PyTorch tensor index. The eval (`m4_eval.py`) runs PyTorch-native batched `cdist + topk` queries from each holdout game's mid-game anchors against the index, computes binary cohort entropy, and reports a k-sweep plus per-minute table. Three contrast baselines (random-k, static-only encoder, raw frame features) anchor what 0.7 bits *means*. Two ablations (player-only, h-only/z-only) are deferred to beads.
 
 **Tech Stack:** Python 3.12, `uv`, PyTorch 2.11.0+cu130, numpy, pytest, SQLite (existing). No new third-party deps.
 
 **Spec:** `docs/superpowers/specs/2026-04-17-m4-retrieval-check-design.md`. Keep it open while implementing.
+
+> **Alignment note:** The headline entropy threshold is a necessary condition, not the whole story. Random-k retrieval is also high-entropy and bad. Any write-up from this plan should report the threshold result **and** the baseline contrast.
 
 ---
 
@@ -2171,10 +2173,10 @@ ssh "$HOWL_GPU_HOST" 'cd ~/build/howtowin.lol && hf upload <user>/<repo> data/re
 
 Open the markdown report. Check:
 
-1. **Headline gate:** `mean entropy ≥ 0.7 bits` at `k=64` on **both** `game_cold` and `player_cold` holdouts.
+1. **Necessary gate:** `mean entropy ≥ 0.7 bits` at `k=64` on **both** `game_cold` and `player_cold` holdouts.
 2. **Baseline contrast:** model k=64 entropy is **below** random-k entropy (which should be ≈1.0) — i.e., our cohorts are tighter than random.
-3. **Baseline contrast:** model k=64 entropy is also strictly less than the static-only and frame-features baselines, *or* — if the model entropy is roughly equal to a baseline — the per-minute structure should still show meaningful variation. (A model that ties with frame-features hasn't learned beyond hand-crafted state.)
-4. **Per-minute curve:** entropy is highest somewhere in the middle of the 10–25 window (mid-game is when outcomes are most uncertain). A flat or inverted curve is a finding worth opening as a follow-up.
+3. **Baseline interpretation:** compare model k=64 entropy to static-only and frame-features. If the model ties or trails a trivial baseline, record that explicitly as an unresolved question rather than treating the `0.7` threshold as sufficient by itself.
+4. **Per-minute curve:** treat mid-window peaking as a diagnostic expectation, not an automatic pass/fail rule. A flat or inverted curve is a finding worth opening as a follow-up.
 5. **Sanity check the row counts:** model corpus rows ≈ static-only corpus rows ≈ frame-features corpus rows ± a few %. Large divergence suggests one of the encoders is dropping or duplicating games.
 
 If any gate misses, file a follow-up bead with the specific number and decide with the user whether to iterate or accept.

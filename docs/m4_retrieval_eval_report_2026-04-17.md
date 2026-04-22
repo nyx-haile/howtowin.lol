@@ -2,7 +2,9 @@
 
 **Date:** 2026-04-17
 **Gate:** mean cohort outcome entropy ≥ 0.7 bits at k=64 on both holdouts.
-**Result:** **PASS**
+**Result:** **PASS on the necessary entropy gate**
+
+**Historical note.** This report clears the headline `0.7`-bit threshold on both holdouts, but that threshold is only a necessary condition. The same tables show two unresolved interpretation questions: the model trails the frame-features baseline at every reported `k`, and the per-minute entropy curve is front-loaded rather than peaking mid-window. Follow-up beads were filed for both questions.
 
 ## game_cold (n_queries=933)
 

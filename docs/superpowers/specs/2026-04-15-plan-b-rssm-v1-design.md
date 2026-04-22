@@ -27,9 +27,30 @@ Framing: **proof of life in a data-starved regime.** The corpus is 731 games (Pl
 - Cross-patch generalization — corpus is one patch window; expanded patch range waits for corpus growth.
 - Policy / reward learning — still out.
 
+## Alignment note
+
+`2026-04-15-sequence-model-design.md` remains the **normative** architecture doc. The stricter goals there — full static game context, event-token dynamics between anchors, and richer next-event semantics — are still the intended destination.
+
+Plan B is allowed to **stage toward** those goals because Milestone 3 is explicitly a proof-of-life in a data-starved regime. But any relaxation used for Milestone 3 must be treated as a **temporary proxy**, not as closure on the upstream design question.
+
+Questions that remain explicitly open in Plan B:
+- whether Milestone 3 may temporarily use a windowed event-type proxy instead of the full `(event type × actor × target)` next-event objective;
+- whether pooled per-anchor action summaries are good enough for Milestone 3, or whether event tokens must directly advance the latent between anchors even in the first RSSM pass;
+- how much of Stream 1 must be present before a Plan B result can be described as a fair test of the core three-stream design rather than a reduced proof-of-life.
+
 ## Amendments from the core sequence model design
 
-The core design from `2026-04-15-sequence-model-design.md` stands except where amended below. Everything unlisted (three-stream input, two-tier decision/outcome split, hybrid-time dynamic sequence, RSSM over plain transformer, per-participant state fusion, cross-attended static context) is unchanged.
+The core design from `2026-04-15-sequence-model-design.md` stands except where amended below. Everything unlisted remains **target architecture**. Silence does **not** imply that a stricter upstream question has been settled by a lighter downstream implementation.
+
+### A0. Temporary proxies vs target architecture
+
+The following distinctions matter for all downstream docs and reports:
+
+- **Stream 1 coverage.** Patch-vector scaffolding is allowed for early Plan B experiments, but it does **not** satisfy the core-spec requirement that static context include picks, sides, queue, region, time-of-day, and rich numeric patch conditioning.
+- **Next-event supervision.** A windowed multi-hot event-type proxy may be acceptable for Milestone 3 signal validation, but it does **not** replace the core `(event type × actor × target)` objective.
+- **Between-anchor dynamics.** Pooled per-anchor action summaries may be used as a training convenience in the proof-of-life regime, but they do **not** settle the upstream question of whether event tokens should directly feed the latent between anchors.
+
+Any Plan B eval/report produced from a proxy implementation should name the proxy explicitly.
 
 ### A1. Loss-head weight rebalance
 
@@ -144,9 +165,10 @@ Leak probe (automatic fail if triggered):
 
 For implementation reference. Unchanged from the core spec except where amended above.
 
-- **Static encoder.** MLP: `PATCH_VECTOR_DIM=1024` → 512 → 512. Output cross-attends into the RSSM at every anchor step. `PATCH_VECTOR_MODE` flag controls whether non-version slots are zeroed.
+- **Static encoder / conditioning.** Target architecture remains the core-spec design: full static game context encoded once and conditioned into the RSSM at every anchor step. During Plan B, `PATCH_VECTOR_MODE=scaffolding` is allowed as a temporary proof-of-life proxy, but that proxy should not be described as full Stream-1 coverage.
 - **Player encoder.** MLP over `PLAYER_FEATURE_DIM=16` crafted features → 128 → `D_PLAYER`. Learnable per-puuid residual of `D_PLAYER` dims, zero-initialized, `padding_idx=0` for unseen players. Residual added to MLP output. Fused into each participant's state vector in the dynamic stream. `D_PLAYER` carries forward from Plan A (256) unless the implementation plan pins it lower; consistency with Plan A's existing encoder is the default.
 - **Dynamic stream embedder.** Token embedding (vocab 19) + actor slot embedding (`NUM_SLOTS=11`) + sinusoidal positional encoding on `timestamp_ms`. Participant player-embedding gathered at positions with `actor > 0`.
+- **Recurrence granularity.** Target architecture still updates through event tokens between anchors. If an implementation instead compresses the between-anchor window into a pooled action summary and advances once per anchor, treat that as a temporary approximation rather than the final architectural answer.
 - **RSSM core.**
   - `h_t`: GRU hidden, dimension 512.
   - `z_t`: stochastic latent, dimension 32, continuous (isotropic Gaussian).
@@ -155,7 +177,7 @@ For implementation reference. Unchanged from the core spec except where amended 
   - KL-balanced loss: stop-gradient on posterior for KL-to-prior, stop-gradient on prior for KL-to-posterior; standard Dreamer pattern.
   - Free-bits: 0.5 per latent dim, applied per-sample per-step.
 - **Decoder heads (all distributional, operate on `z_t`):**
-  1. Next-event: multi-hot BCE over 11 event types for the next-minute window (Plan A's label shape, retained).
+  1. Next-event: target objective remains the core-spec `(event type × actor × target)` distribution. A multi-hot BCE over 11 event types for the next-minute window is acceptable only as a Milestone 3 proxy and must be labeled as such.
   2. Next-frame features: per-participant μ and σ over gold/XP/level/position deltas.
   3. Outcome: scalar logit for game win at each anchor (supervised with game-end label, broadcast).
   4. Next-decision: categorical per participant over decision types (ITEM_PURCHASED, SKILL_LEVEL_UP, WARD_PLACED, RECALL, ENGAGE, DISENGAGE).
@@ -183,14 +205,18 @@ Plan-B-specific:
 - Every new feature that could leak ships with a regression test *in the same commit*.
 - Training CLI flags default to scaffolding-safe configurations (e.g. `--patch-vector-mode scaffolding`).
 
-## Open questions (resolved during implementation plan)
+## Open questions
 
-These are pinned during the plan-writing phase from the spec's perspective; if new evidence emerges during implementation, revisit.
+These remain explicitly open after the downstream-alignment pass and should be answered deliberately, not by accidental drift in implementation.
 
 - Exact structure of `ANCHOR_OBSERVATION_FEATURES` fed to the posterior.
+- Whether Milestone 3 should require the full `(event type × actor × target)` next-event target, or whether the multi-hot event-type proxy remains acceptable for a first proof-of-life run.
+- Whether Plan B should require event-token updates between anchors, or allow pooled per-anchor action summaries for the first RSSM pass only.
+- Exact Stream-1 feature bundle required before a result can be described as testing the full three-stream design rather than a reduced proxy.
 - Whether to use categorical latent (Dreamer-V2/V3 style) instead of continuous 32-dim Gaussian. **Default: Gaussian.** Categorical adds implementation complexity that is not warranted at this corpus scale.
 - Rollout-loss weighting schedule (fixed vs ramp). **Default: fixed weights 0.05/0.03/0.02.**
 - Gradient-clipping norm. **Default: 1.0** (carried from Plan A).
+- Exact mapping between the spec-level statement "KL weight starts at 0.01" and any implementation-level loss coefficient. Downstream docs should report the literal code coefficient used rather than claiming equivalence unless it has been demonstrated.
 
 ## Not revisiting
 

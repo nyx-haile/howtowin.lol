@@ -8,6 +8,8 @@
 **Command:** `python -m model.cli plan-b-train --epochs 30`
 **Eval log:** `data/logs/plan_b_eval_APR_17.log`
 
+**Historical note.** This run should be read as a **pragmatic proof-of-life pass**, not as closure on every stricter downstream check. It clearly clears the outcome/leak thresholds needed to show signal is present, but it does **not** satisfy the stricter "monotonic AUC by minute" or "step-1 ≥ step-2 ≥ step-3 rollout ordering" expectations that later docs discuss explicitly.
+
 ## Results
 
 ### Outcome AUC by minute
@@ -44,9 +46,11 @@ AUC@15 = **0.531** (target ≤ 0.55, clean)
 
 ## Gating status
 
-All Plan B M6 (Task 14) exit criteria met:
+Pragmatic proof-of-life checks used for the first Plan B run:
 
 - [x] Game-cold outcome AUC@15 > 0.8
 - [x] Player-cold outcome AUC@15 > 0.8
 - [x] Imagination-rollout top-5 > 0.5 at step 3
 - [x] Leak probe AUC@15 ≤ 0.55
+- [ ] Strict monotonic AUC-by-minute on both holdouts
+- [ ] Strict rollout ordering `step-1 ≥ step-2 ≥ step-3`

@@ -7,7 +7,7 @@
 
 ## Purpose
 
-Build a kNN retrieval layer over the Plan B latent state and prove that nearest-neighbour cohorts of held-out mid-game anchors carry **informative outcome splits**. The single gate is **mean cohort outcome entropy ≥ 0.7 bits** at headline `k=64`, restricted to mid-game anchors (minutes 10–25), measured on both the game-cold and player-cold holdouts.
+Build a kNN retrieval layer over the Plan B latent state and prove that nearest-neighbour cohorts of held-out mid-game anchors carry **informative outcome splits**. The headline necessary gate is **mean cohort outcome entropy ≥ 0.7 bits** at headline `k=64`, restricted to mid-game anchors (minutes 10–25), measured on both the game-cold and player-cold holdouts.
 
 This is the gate before M5 (teaching surfaces). A high-entropy cohort is what a critical-point lesson lives inside: half the cohort won, half lost, from the same state — meaning a *decision* differentiated them. If the latent doesn't produce such cohorts, M5's lessons inherit broken signal.
 
@@ -20,6 +20,14 @@ Out of scope for this design:
 - Production-grade kNN serving (FAISS, sharded indices, low-latency lookup) — see `howtowin.lol-l2z`.
 - Re-training Plan B. The trained checkpoint `data/model_checkpoints/plan_b_full_best.pt` is consumed as-is.
 - Any user-facing surface.
+
+## Alignment note
+
+This doc inherits the stricter upstream goal that retrieval should test whether the latent captures **in-game state**, not just draft or identity proxies. That means the entropy threshold is **necessary but not sufficient**:
+
+- entropy that is too low means the cohort is one-sided and unteachable;
+- entropy that is too high (e.g. near random-k ≈ 1.0) means the cohort is too loose to be useful;
+- therefore the headline threshold must be interpreted alongside the baseline comparisons below.
 
 ## Architecture
 
@@ -111,7 +119,9 @@ with `H(0) = H(1) = 0`. The metric does not reference the query's own outcome �
 
 ### Headline gate
 
-`mean_H ≥ 0.7 bits` at `k=64`, **on both** game-cold and player-cold holdouts. (≥0.7 bits ⇒ cohort win-rate roughly in [0.20, 0.80].)
+Necessary condition: `mean_H ≥ 0.7 bits` at `k=64`, **on both** game-cold and player-cold holdouts. (≥0.7 bits ⇒ cohort win-rate roughly in [0.20, 0.80].)
+
+Interpretation then uses the baseline contrast below: the model should sit well **below** random-k entropy, and its position relative to static-only / frame-features tells us whether the learned latent adds value beyond trivial proxies.
 
 ### k sweep
 
@@ -119,7 +129,7 @@ Run the eval at `k ∈ {16, 32, 64, 128, 256}` and report the entropy curve. Gua
 
 ### Per-minute breakdown
 
-Report mean H(p) per minute bucket (10..25) at headline `k=64`. We expect entropy to be **higher at min-15 than at min-5 or min-25** (early states are uncommitted; late states are decided). A flat or inverted curve is a finding worth investigating.
+Report mean H(p) per minute bucket (10..25) at headline `k=64`. We hypothesize entropy will peak somewhere in the middle of the window (early states are uncommitted; very late states are decided), but this is a **diagnostic expectation**, not a standalone pass/fail gate. A flat or inverted curve is a finding worth investigating.
 
 ### Baselines
 

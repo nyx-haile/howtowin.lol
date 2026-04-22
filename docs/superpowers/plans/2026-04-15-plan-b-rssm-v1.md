@@ -4,11 +4,13 @@
 
 **Goal:** Ship an action-conditioned RSSM world model over the Plan A three-stream input that predicts per-minute win/loss, next meaningful event, next participant decision, and next frame features, with validated imagination-rollout capability and strict leak discipline.
 
-**Architecture:** Reuse Plan A encoders + dataset + tokenizer unchanged. Replace the causal transformer with an RSSM core (GRU deterministic state + 32-dim Gaussian latent with KL-balanced prior/posterior + low KL weight with free-bits) operating one step per anchor. Four distributional decoder heads run off `z_t`. Training adds a prior-rollout auxiliary loss so imagination works multi-step. Data pipeline adds a player-cold secondary holdout and a stream-2 leak audit.
+**Architecture:** Build on the Plan A pipeline as scaffolding, but do **not** treat Plan A static inputs or label shapes as complete coverage of the core sequence-model spec. The stricter upstream goals remain target architecture; if this plan uses temporary proxies (for example: windowed multi-hot next-event labels, pooled per-anchor action summaries, or static conditioning that only seeds `h_0`) they are Milestone 3 staging choices rather than settled design answers.
 
 **Tech Stack:** Python 3.12, `uv`, PyTorch 2.11.0+cu130, SQLite, numpy, pytest, `sklearn.metrics.roc_auc_score`.
 
 **Spec:** `docs/superpowers/specs/2026-04-15-plan-b-rssm-v1-design.md`. Keep it open while implementing.
+
+> **Alignment note:** `docs/superpowers/specs/2026-04-15-sequence-model-design.md` remains the source of truth. This implementation plan is a staged Milestone 3 plan, not a replacement for the upstream architecture. Any proxy used here should be named explicitly in code comments, reports, and later design docs.
 
 ---
 
@@ -55,6 +57,8 @@
 - `ROLLOUT_LOSS_WEIGHTS = [0.05, 0.03, 0.02]`
 - `HEAD_WEIGHTS = {"outcome": 0.35, "next_event": 0.35, "next_decision": 0.15, "next_frame": 0.10}`
 - `KL_WEIGHT_LOSS = 0.05`
+
+Treat `KL_WEIGHT_INITIAL = 0.01` as the **spec-level target statement** and any literal code coefficient (e.g. `KL_WEIGHT_LOSS`) as a separate implementation detail that must be reported directly. Do not assume those numbers are semantically equivalent unless that mapping has been demonstrated.
 
 ---
 
@@ -2130,15 +2134,18 @@ scripts/sync-gpu.sh pull
 
 - [ ] **Step 6: Verify targets hit**
 
-Open `planb_eval.txt`. Check each primary gate from the spec:
+Open `planb_eval.txt`. Check **two layers** of acceptance:
 
-1. **Outcome AUC monotonicity:** min 5 < min 10 < min 15 < min 20 < min 25 on *both* holdouts. Flat curve = fail.
-2. **Game-cold targets:** ≥0.55 @ min 5, ≥0.70 @ min 15, ≥0.85 @ min 25.
-3. **Player-cold ratio:** player-cold AUC@15 ≥ 0.80 × game-cold AUC@15.
-4. **Imagination rollout:** step-1 ≥ step-2 ≥ step-3, and step-3 > 0.45 (beats uniform).
-5. **Leak probe:** frozen-m0 AUC@15 ≤ 0.55.
+1. **Strict research checks from the downstream spec**
+   - Outcome AUC should be monotonically non-decreasing with game time on both holdouts.
+   - Imagination rollout should satisfy step-1 ≥ step-2 ≥ step-3.
+2. **Pragmatic Milestone 3 proof-of-life gates**
+   - Game-cold targets: ≥0.55 @ min 5, ≥0.70 @ min 15, ≥0.85 @ min 25.
+   - Player-cold ratio: player-cold AUC@15 ≥ 0.80 × game-cold AUC@15.
+   - Step-3 rollout top-5 > 0.45 (beats uniform).
+   - Leak probe: frozen-m0 AUC@15 ≤ 0.55.
 
-If any gate fails, open a follow-up bead documenting which gate and the metric value, then decide (with user) whether to iterate or accept.
+Any miss on the **strict** checks is a documented open question even if the pragmatic gates pass. Any miss on the **pragmatic** gates is a fail unless the user explicitly accepts it.
 
 - [ ] **Step 7: Commit eval artifact**
 
@@ -2170,7 +2177,7 @@ Running the three checks from the writing-plans skill against the spec:
 - §A1 (loss weight rebalance) → Task 10 (HEAD_WEIGHTS constants + `_combined_loss`).
 - §A2 (prior rollout reconstruction) → Task 7 (primitive), Task 10 (`_rollout_aux_loss`).
 - §A3 (static vector scaffolding, PATCH_VECTOR_DIM=1024) → Task 1.
-- §A4 (KL 0.01, free-bits 0.5, z_t=32) → Task 5 (free_bits_kl), Task 10 (KL_WEIGHT_LOSS=0.05, note: this is the loss-weight on KL; the 0.01 in the spec refers to effective KL scaling after free-bits clamping; `KL_WEIGHT_LOSS=0.05` × free-bits floor ≈ Dreamer-low regime).
+- §A4 (KL 0.01, free-bits 0.5, z_t=32) → Task 5 (free_bits_kl), Task 10 (literal code coefficient must be reported directly; do not claim exact equivalence to the spec-level 0.01 statement without evidence).
 - §A5 (30 epochs, early stop on player-cold AUC@15) → Task 10 (EARLY_STOP_PATIENCE=5, early-stop on cold_auc).
 - §B1 (stream-2 leak audit) → Task 2.
 - §B2 (player-cold-start holdout) → Task 3, Task 4.

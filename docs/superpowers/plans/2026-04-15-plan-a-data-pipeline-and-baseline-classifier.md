@@ -2421,7 +2421,7 @@ git commit -m "plan-a: retrospective"
 
    | Spec requirement | Task |
    | --- | --- |
-   | Static context stream (picks, sides, patch, queue, region, time-of-day, patch-as-numeric) | Task 6 (patch_params), Task 9 (StaticContextEncoder) |
+   | Static context stream | **Partial only in Plan A.** Task 6 + Task 9 cover patch-vector scaffolding and a static encoder, but they do **not** fully implement picks, sides, queue, region, and time-of-day from the core spec. |
    | Player models stream (crafted + learnable residual) | Task 7 (player_features), Task 9 (PlayerModelEncoder) |
    | Dynamic sequence stream (hybrid time: anchors + events) | Tasks 1, 5, 9 |
    | Decisions (purchase, skill-up, ward — explicit; recall, engage/disengage — inferred) | Tasks 3, 4, 5 |
