@@ -48,3 +48,24 @@ scripts/sync-gpu.sh pull
 ```
 
 Wrap it in `tmux` on the GPU side for any run longer than a minute so an SSH disconnect doesn't kill the job.
+
+## upload_checkpoint.py
+
+Prepare and optionally push curated checkpoints to a Hugging Face **model repo** using Git + LFS. This is the path to use when a checkpoint should have commit history / tags / branches; use plain `hf upload` for one-off blobs instead.
+
+```bash
+read -rsp 'HF token: ' HF_TOKEN && export HF_TOKEN && echo
+export HOWL_HF_MODEL_REPO=nyx-haile/howtowin-plan-b-rssm-v1
+
+python3 scripts/upload_checkpoint.py \
+  --repo "$HOWL_HF_MODEL_REPO" \
+  --dry-run \
+  data/model_checkpoints/plan_b_full_best.pt
+
+HF_TOKEN="$HF_TOKEN" python3 scripts/upload_checkpoint.py \
+  --repo "$HOWL_HF_MODEL_REPO" \
+  --push \
+  data/model_checkpoints/plan_b_full_best.pt
+```
+
+See `docs/huggingface-model-repo-workflow.md` for the decision guide (`hf upload` vs Git + LFS), security notes, and the manual fallback commands.
