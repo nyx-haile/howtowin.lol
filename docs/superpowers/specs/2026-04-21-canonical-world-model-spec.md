@@ -74,8 +74,8 @@ The patch-conditioning requirement is unchanged from the original spec: it exist
 Canonical conditioning rule:
 
 - static context is encoded once per game;
-- the encoded static context is available to the sequence model at **every anchor/event step**;
-- cross-attention is the reference mechanism, but another equivalent conditioning mechanism is acceptable if it preserves per-step access to the same information.
+- the encoded static context is available to the sequence model at **every anchor/event step** via cross-attention;
+- cross-attention is required, not merely preferred: a seed-only conditioner (e.g. `static_to_h`) does not satisfy per-step access and must not be reported as equivalent.
 
 **Important:** patch-version scaffolding by itself is **not** full Stream-1 coverage and must never be reported as such.
 
@@ -217,13 +217,17 @@ All major heads remain required.
 
 ### Training priorities
 
-The old high-level weighting logic still holds, but this spec intentionally locks the **ordering of priorities**, not one exact numeric coefficient set:
+This spec intentionally locks the **ordering of priorities**, not exact numeric coefficients:
 
 - next-event and outcome are the primary objectives;
 - next-decision and next-observation are secondary grounding objectives;
 - KL regularization must be strong enough to keep the latent meaningful and weak enough to avoid collapse in the current data regime.
 
-Implementation plans must report the literal code weights used. They should not claim equivalence to spec-level language unless that equivalence has actually been demonstrated.
+Implementation plans must report the literal code weights used and must not claim equivalence to spec-level language unless demonstrated.
+
+### Milestone pass/fail thresholds
+
+Concrete pass/fail thresholds (e.g., outcome AUC, entropy gate, top-5 accuracy) are **not** defined in this spec. They live in per-milestone design documents and must be set against a model trained on the canonical inputs — thin-proxy thresholds from earlier system states are not valid baselines for architecture-validation claims.
 
 ### Rollout contract
 
