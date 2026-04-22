@@ -35,17 +35,27 @@ class Whitener:
     """Per-dim z-score normalization. Params fit once on the corpus."""
 
     def __init__(self, mu: torch.Tensor, sigma: torch.Tensor):
-        self.mu = mu
-        self.sigma = sigma
+        self.mu = mu.to(dtype=torch.float64)
+        self.sigma = sigma.to(dtype=torch.float64)
 
     @classmethod
     def fit(cls, corpus: torch.Tensor) -> "Whitener":
-        mu = corpus.mean(dim=0)
-        sigma = corpus.std(dim=0, unbiased=False).clamp(min=_SIGMA_FLOOR)
+        # Fit in float64: float32 whitening on the small, high-variance fixture
+        # corpus was numerically noisy enough to make the zero-mean property
+        # intermittently fail in tests, especially across different random
+        # model initialisations. We keep the stored/indexed corpus in the
+        # caller's dtype, but fit/apply using double precision.
+        corpus64 = corpus.to(dtype=torch.float64)
+        mu = corpus64.mean(dim=0)
+        sigma = corpus64.std(dim=0, unbiased=False).clamp(min=_SIGMA_FLOOR)
         return cls(mu=mu, sigma=sigma)
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mu) / self.sigma
+        out_dtype = x.dtype if x.is_floating_point() else torch.float32
+        x64 = x.to(dtype=torch.float64)
+        mu = self.mu.to(device=x.device)
+        sigma = self.sigma.to(device=x.device)
+        return ((x64 - mu) / sigma).to(dtype=out_dtype)
 
     def state_dict(self) -> dict:
         return {"mu": self.mu, "sigma": self.sigma}
@@ -270,16 +280,14 @@ def query_index(
     fetch_k = min(k + n_exclude + 5, len(bundle.row_match_id)) if n_exclude else k
 
     corpus = bundle.corpus_white.to(device)
-    mu = bundle.whitener.mu.to(device)
-    sigma = bundle.whitener.sigma.to(device)
 
     out_idx = torch.empty(Q, k, dtype=torch.long)
     out_d = torch.empty(Q, k, dtype=torch.float32)
 
     for start in range(0, Q, batch_size):
         end = min(start + batch_size, Q)
-        qb = queries_raw[start:end].to(device)
-        qb_white = (qb - mu) / sigma
+        qb = queries_raw[start:end].to(device=device, dtype=corpus.dtype)
+        qb_white = bundle.whitener.apply(qb)
         d = torch.cdist(qb_white, corpus)                       # (b, N)
         d_top, idx_top = d.topk(fetch_k, dim=1, largest=False)  # (b, fetch_k)
 

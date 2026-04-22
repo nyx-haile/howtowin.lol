@@ -134,6 +134,7 @@ def test_build_index_corpus_is_whitened(fixture_match_id):
     from model.retrieval import build_index, KEY_DIM
     from model.plan_b_model import PlanBModel
     from model.dataset import build_puuid_index
+    torch.manual_seed(0)
     idx = build_puuid_index([fixture_match_id])
     model = PlanBModel(max_puuids=len(idx) + 1)
     bundle = build_index(
@@ -150,6 +151,28 @@ def test_build_index_corpus_is_whitened(fixture_match_id):
     assert torch.allclose(
         bundle.corpus_white.mean(dim=0), torch.zeros(KEY_DIM), atol=1e-4
     )
+
+
+def test_build_index_whitening_is_stable_for_known_random_seeds(fixture_match_id):
+    from model.retrieval import build_index, KEY_DIM
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+    idx = build_puuid_index([fixture_match_id])
+
+    for seed in (0, 40, 44):
+        torch.manual_seed(seed)
+        model = PlanBModel(max_puuids=len(idx) + 1)
+        bundle = build_index(
+            model=model,
+            train_match_ids=[fixture_match_id],
+            exclude_match_ids=set(),
+            puuid_index=idx,
+            device="cpu",
+        )
+        assert bundle.corpus_white.shape[1] == KEY_DIM
+        assert (
+            bundle.corpus_white.mean(dim=0).abs().max().item() < 1e-4
+        ), f"whitening drifted above tolerance for seed {seed}"
 
 
 def test_build_index_records_per_row_metadata(fixture_match_id):
