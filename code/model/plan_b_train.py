@@ -1,24 +1,30 @@
 import os
 import time
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from model.dataset import MatchDataset, build_puuid_index, collate_games, load_split
-from model.plan_b_model import PlanBModel, D_Z
-from model.rssm import free_bits_kl
+from model.dataset import MatchDataset, build_puuid_index, collate_games
+from model.plan_b_model import D_Z, PlanBModel
 from model.rollout import rollout_prior
-from model.tokens import NUM_EVENT_TYPES
-
+from model.rssm import free_bits_kl
+from model.tokens import EVENT_TYPE_TO_ID, event_label_from_type_id
 
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "model_checkpoints")
 FREE_BITS_PER_DIM = 0.5
 KL_WEIGHT_LOSS = 0.05
 ROLLOUT_STEPS = 3
 ROLLOUT_LOSS_WEIGHTS = [0.05, 0.03, 0.02]
-HEAD_WEIGHTS = {"outcome": 0.35, "next_event": 0.35,
-                "next_decision": 0.15, "next_frame": 0.10}
+HEAD_WEIGHTS = {"outcome": 0.35, "next_event": 0.35, "next_decision": 0.15, "next_frame": 0.10}
 EARLY_STOP_PATIENCE = 5
+
+ITEM_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["ITEM_PURCHASED"])
+SKILL_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["SKILL_LEVEL_UP"])
+MONSTER_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["ELITE_MONSTER_KILL"])
+BUILDING_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["BUILDING_KILL"])
+WARD_PLACED_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["WARD_PLACED"])
+WARD_KILL_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["WARD_KILL"])
 
 
 def _get_device():
@@ -28,51 +34,75 @@ def _get_device():
 
 
 def _batch_to_device(batch, device):
-    return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()}
+    return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
 def _outcome_labels(batch):
-    # (B,) -> broadcast to (B, T)
-    win = batch["outcome"]  # dataset must supply this (game winner label per sample)
+    win = batch["outcome"]
     T = batch["anchor_positions"].size(1)
     return win.unsqueeze(1).expand(-1, T).float()
 
 
 def _frame_delta_labels(batch):
-    # Delta of frame_features between consecutive anchors: (B, T-1, 10, 6)
     ff = batch["frame_features"]
     return ff[:, 1:] - ff[:, :-1]
 
 
+def _masked_ce(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+    if not mask.any():
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits[mask], targets[mask], reduction="mean")
+
+
+def _event_loss_components(out, batch):
+    event = out["event_factors"]
+    type_labels = batch["next_event_type_labels"]
+    actor_labels = batch["next_event_actor_labels"]
+    target_labels = batch["next_event_target_labels"]
+    item_labels = batch["next_event_item_labels"]
+    skill_labels = batch["next_event_skill_labels"]
+    monster_type_labels = batch["next_event_monster_type_labels"]
+    monster_subtype_labels = batch["next_event_monster_subtype_labels"]
+    building_type_labels = batch["next_event_building_type_labels"]
+    lane_type_labels = batch["next_event_lane_type_labels"]
+    tower_type_labels = batch["next_event_tower_type_labels"]
+    ward_type_labels = batch["next_event_ward_type_labels"]
+
+    losses = []
+    losses.append(F.cross_entropy(event["type_logits"].reshape(-1, event["type_logits"].size(-1)), type_labels.reshape(-1)))
+
+    has_event = type_labels > 0
+    losses.append(_masked_ce(event["actor_logits"], actor_labels, has_event))
+    losses.append(_masked_ce(event["target_logits"], target_labels, has_event))
+    losses.append(_masked_ce(event["item_logits"], item_labels, type_labels == ITEM_EVENT_LABEL))
+    losses.append(_masked_ce(event["skill_logits"], skill_labels, type_labels == SKILL_EVENT_LABEL))
+    losses.append(_masked_ce(event["monster_type_logits"], monster_type_labels, type_labels == MONSTER_EVENT_LABEL))
+    losses.append(_masked_ce(event["monster_subtype_logits"], monster_subtype_labels, type_labels == MONSTER_EVENT_LABEL))
+    losses.append(_masked_ce(event["building_type_logits"], building_type_labels, type_labels == BUILDING_EVENT_LABEL))
+    losses.append(_masked_ce(event["lane_type_logits"], lane_type_labels, type_labels == BUILDING_EVENT_LABEL))
+    losses.append(_masked_ce(event["tower_type_logits"], tower_type_labels, type_labels == BUILDING_EVENT_LABEL))
+    ward_mask = (type_labels == WARD_PLACED_EVENT_LABEL) | (type_labels == WARD_KILL_EVENT_LABEL)
+    losses.append(_masked_ce(event["ward_type_logits"], ward_type_labels, ward_mask))
+    return torch.stack(losses).mean()
+
+
 def _compute_losses(out, batch):
     losses = {}
+    losses["next_event"] = _event_loss_components(out, batch)
 
-    event_logits = out["event_logits"]  # (B, T, NUM_EVENT_TYPES)
-    # Need to gather labels at anchor positions from the full-sequence labels
-    anchor_pos = batch["anchor_positions"]  # (B, T)
-    B, T = anchor_pos.shape
-    # labels is (B, L, NUM_EVENT_TYPES) — gather at anchor positions
-    idx = anchor_pos.unsqueeze(-1).expand(B, T, out["event_logits"].size(-1))
-    anchor_labels = torch.gather(batch["labels"], 1, idx)  # (B, T, NUM_EVENT_TYPES)
-    losses["next_event"] = F.binary_cross_entropy_with_logits(
-        event_logits, anchor_labels.float(), reduction="mean"
-    )
-
-    outcome_pred = out["outcome_logits"]  # (B, T)
+    outcome_pred = out["outcome_logits"]
     outcome_targ = _outcome_labels(batch)
     losses["outcome"] = F.binary_cross_entropy_with_logits(outcome_pred, outcome_targ)
 
-    dec_logits = out["decision_logits"]  # (B, T, 10, 6)
-    # Append a no-decision slot as zero-logit (pads last dim from 6 -> 7).
+    dec_logits = out["decision_logits"]
     dec_logits_full = F.pad(dec_logits, (0, 1))
-    losses["next_decision"] = F.cross_entropy(
-        dec_logits_full.view(-1, 7), batch["decision_labels"].view(-1).long()
-    )
+    losses["next_decision"] = F.cross_entropy(dec_logits_full.view(-1, 7), batch["decision_labels"].view(-1).long())
 
-    mu = out["frame_mu"][:, :-1]      # (B, T-1, 10, 6)
+    mu = out["frame_mu"][:, :-1]
     logvar = out["frame_logvar"][:, :-1]
-    target = _frame_delta_labels(batch)    # (B, T-1, 10, 6)
+    target = _frame_delta_labels(batch)
     gauss_nll = 0.5 * (logvar + (target - mu).pow(2) / logvar.exp())
     losses["next_frame"] = gauss_nll.mean()
 
@@ -82,30 +112,21 @@ def _compute_losses(out, batch):
         free_bits_per_dim=FREE_BITS_PER_DIM,
     )
     losses["kl"] = kl.mean()
-
     return losses
 
 
 def _rollout_aux_loss(model, out, batch):
-    """Roll the prior forward ROLLOUT_STEPS from h_final/z_final; apply event +
-    outcome heads on the rolled latents. Use last-observed labels as the
-    multi-step target (cheap proxy; heads still see distribution shift)."""
     if ROLLOUT_STEPS == 0:
         return torch.tensor(0.0, device=out["event_logits"].device)
-    steps = rollout_prior(model.rssm, out["h_final"], out["z_final"],
-                          n_steps=ROLLOUT_STEPS, action_summary=None)
+    steps = rollout_prior(model.rssm, out["h_final"], out["z_final"], n_steps=ROLLOUT_STEPS, action_summary=None)
+    last_type = batch["next_event_type_labels"][:, -1]
+    last_outcome = _outcome_labels(batch)[:, -1]
     total = 0.0
-    # Gather last anchor's labels
-    anchor_pos = batch["anchor_positions"]
-    B, T = anchor_pos.shape
-    idx = anchor_pos[:, -1:].unsqueeze(-1).expand(B, 1, batch["labels"].size(-1))
-    last_labels = torch.gather(batch["labels"], 1, idx).squeeze(1).float()  # (B, NUM_EVENT_TYPES)
-    last_outcome = _outcome_labels(batch)[:, -1]  # (B,)
-    for (h, z, _mu, _lv), w in zip(steps, ROLLOUT_LOSS_WEIGHTS):
-        ev_logits = model.head_event(z)
+    for (_h, z, _mu, _lv), w in zip(steps, ROLLOUT_LOSS_WEIGHTS):
+        ev = model.head_event(z)
         oc_logits = model.head_outcome(z)
         total = total + w * (
-            F.binary_cross_entropy_with_logits(ev_logits, last_labels) +
+            F.cross_entropy(ev["type_logits"], last_type) +
             F.binary_cross_entropy_with_logits(oc_logits, last_outcome)
         )
     return total
@@ -126,10 +147,8 @@ def _combined_loss(losses, rollout_aux):
 @torch.no_grad()
 def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
     from sklearn.metrics import roc_auc_score
-    # Eval is short and already bounded by GPU forward passes — forkserver
-    # worker startup would dominate. Keep the eval loader on the main thread.
-    loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False,
-                        num_workers=0, pin_memory=(device.type == "cuda"))
+
+    loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False, num_workers=0, pin_memory=(device.type == "cuda"))
     y_true, y_score = [], []
     model.eval()
     for batch in loader:
@@ -137,7 +156,7 @@ def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> f
         out = model(batch)
         T = out["n_anchors"]
         minute_idx = min(target_minute, T - 1)
-        probs = torch.sigmoid(out["outcome_logits"])[:, minute_idx]  # (B,)
+        probs = torch.sigmoid(out["outcome_logits"])[:, minute_idx]
         y_score.extend(probs.cpu().tolist())
         y_true.extend(batch["outcome"].cpu().tolist())
     model.train()
@@ -155,12 +174,10 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
 
-    # Exclude both holdouts from any feature aggregate queried during training.
     exclude = set(val_match_ids) | set(cold_match_ids)
     train_ds = MatchDataset(train_match_ids, puuid_index, exclude_match_ids=exclude)
     val_ds = MatchDataset(val_match_ids, puuid_index, exclude_match_ids=exclude)
-    cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) \
-              if cold_match_ids else None
+    cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) if cold_match_ids else None
 
     device = _get_device()
     use_amp = device.type == "cuda"
@@ -176,13 +193,17 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     patience_left = EARLY_STOP_PATIENCE
     best_path = os.path.join(CHECKPOINT_DIR, f"{checkpoint_tag}_best.pt")
 
-    loader = DataLoader(train_ds, batch_size=batch_size,
-                        collate_fn=collate_games, shuffle=True,
-                        num_workers=num_workers,
-                        persistent_workers=(num_workers > 0),
-                        prefetch_factor=(2 if num_workers > 0 else None),
-                        pin_memory=use_amp,
-                        multiprocessing_context=("forkserver" if num_workers > 0 else None))
+    loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        collate_fn=collate_games,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=(2 if num_workers > 0 else None),
+        pin_memory=use_amp,
+        multiprocessing_context=("forkserver" if num_workers > 0 else None),
+    )
     n_train_batches = len(loader)
 
     for ep in range(epochs):
@@ -221,20 +242,20 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         history["game_cold_auc15"].append(game_auc)
         history["player_cold_auc15"].append(cold_auc)
 
-        print(f"epoch {ep+1}/{epochs} done  loss={ep_loss:.4f}  "
-              f"game_cold_auc15={game_auc:.3f}  player_cold_auc15={cold_auc:.3f}")
+        print(f"epoch {ep+1}/{epochs} done  loss={ep_loss:.4f}  game_cold_auc15={game_auc:.3f}  player_cold_auc15={cold_auc:.3f}")
 
         if cold_auc > best_cold_auc + 1e-4:
             best_cold_auc = cold_auc
             patience_left = EARLY_STOP_PATIENCE
-            torch.save({"state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
-                        "max_puuids": max_puuids,
-                        "history": history}, best_path)
+            torch.save({
+                "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
+                "max_puuids": max_puuids,
+                "history": history,
+            }, best_path)
         else:
             patience_left -= 1
             if patience_left <= 0:
-                print(f"Early stop at epoch {ep+1} (no player-cold AUC@15 gain "
-                      f"for {EARLY_STOP_PATIENCE} epochs).")
+                print(f"Early stop at epoch {ep+1} (no player-cold AUC@15 gain for {EARLY_STOP_PATIENCE} epochs).")
                 break
 
     return history

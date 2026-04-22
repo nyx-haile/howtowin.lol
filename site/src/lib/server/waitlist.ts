@@ -83,9 +83,10 @@ export function parseWaitlistSubmission(formData: FormData): ParsedWaitlistSubmi
 }
 
 export async function saveWaitlistSignup(db: D1Database, signup: WaitlistSignup): Promise<void> {
-	await db.exec(WAITLIST_TABLE_SQL);
-
 	const timestamp = new Date().toISOString();
 
-	await db.prepare(WAITLIST_UPSERT_SQL).bind(signup.email, signup.source, timestamp).run();
+	await db.batch([
+		db.prepare(WAITLIST_TABLE_SQL),
+		db.prepare(WAITLIST_UPSERT_SQL).bind(signup.email, signup.source, timestamp)
+	]);
 }

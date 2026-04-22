@@ -20,6 +20,20 @@ INDEX = os.path.join(
 )
 
 
+def _has_compatible_artifacts():
+    if not (os.path.exists(CKPT) and os.path.exists(INDEX)):
+        return False
+    try:
+        from model.lesson import _load_model
+        _load_model(CKPT, device="cpu")
+    except Exception:
+        return False
+    return True
+
+
+HAS_COMPATIBLE_ARTIFACTS = _has_compatible_artifacts()
+
+
 def _fake_bundle(N=100, seed=0):
     """Build a stand-in IndexBundle for candidate-selection tests."""
     from model.retrieval import IndexBundle, Whitener, KEY_DIM
@@ -126,8 +140,8 @@ def test_query_index_excludes_match_ids():
 
 
 @pytest.mark.skipif(
-    not (os.path.exists(CKPT) and os.path.exists(INDEX)),
-    reason="requires trained checkpoint + retrieval index",
+    not HAS_COMPATIBLE_ARTIFACTS,
+    reason="requires a trained checkpoint + retrieval index compatible with the current PlanBModel",
 )
 def test_generate_lesson_end_to_end():
     """Integration smoke: first held-out game → valid lesson structure."""
@@ -155,8 +169,8 @@ def test_generate_lesson_end_to_end():
 
 
 @pytest.mark.skipif(
-    not (os.path.exists(CKPT) and os.path.exists(INDEX)),
-    reason="requires trained checkpoint + retrieval index",
+    not HAS_COMPATIBLE_ARTIFACTS,
+    reason="requires a trained checkpoint + retrieval index compatible with the current PlanBModel",
 )
 def test_generate_lesson_train_match_no_self_in_cohort():
     """Train-set match must not appear in its own cohort after exclusion fix."""

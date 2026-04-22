@@ -1,4 +1,4 @@
-from model.tokenizer import tokenize_match, Token
+from model.tokenizer import Token, tokenize_match
 from model.tokens import ANCHOR_TOKEN, EVENT_TYPE_TO_ID
 
 
@@ -24,9 +24,6 @@ def test_anchor_interval_is_60s(fixture_match_id):
     stream = tokenize_match(fixture_match_id)
     anchor_ts = [t.timestamp_ms for t in stream if t.type_id == ANCHOR_TOKEN]
     assert len(anchor_ts) >= 2
-    # Consecutive anchor gaps should be 60000ms (Riot timeline cadence).
-    # The very last frame is emitted at match end rather than on the minute
-    # boundary, so the final gap may be short; exclude it from the tolerance check.
     gaps = [anchor_ts[i + 1] - anchor_ts[i] for i in range(len(anchor_ts) - 1)]
     assert all(abs(g - 60000) <= 1000 for g in gaps[:-1])
 
@@ -40,15 +37,25 @@ def test_event_tokens_reference_known_slots(fixture_match_id):
         assert 0 <= k.target_slot <= 10
 
 
+def test_payload_fields_surface_item_and_skill_info(fixture_match_id):
+    stream = tokenize_match(fixture_match_id)
+    items = [t for t in stream if t.type_id == EVENT_TYPE_TO_ID["ITEM_PURCHASED"]]
+    skills = [t for t in stream if t.type_id == EVENT_TYPE_TO_ID["SKILL_LEVEL_UP"]]
+    wards = [t for t in stream if t.type_id == EVENT_TYPE_TO_ID["WARD_PLACED"]]
+    assert any(t.item_id > 0 for t in items)
+    assert any(t.skill_slot > 0 for t in skills)
+    if wards:
+        assert any(t.ward_type_id >= 0 for t in wards)
+
+
 def test_token_dataclass_fields():
     t = Token(type_id=0, actor_slot=0, target_slot=0, timestamp_ms=0)
-    assert hasattr(t, "type_id") and hasattr(t, "actor_slot")
-    assert hasattr(t, "target_slot") and hasattr(t, "timestamp_ms")
+    assert hasattr(t, "item_id") and hasattr(t, "skill_slot")
+    assert hasattr(t, "monster_subtype_id") and hasattr(t, "ward_type_id")
 
 
 def test_recall_tokens_inferred(fixture_match_id):
     stream = tokenize_match(fixture_match_id)
     recall_id = EVENT_TYPE_TO_ID["RECALL"]
     recalls = [t for t in stream if t.type_id == recall_id]
-    # A 30+ minute game always has recalls.
     assert len(recalls) >= 1

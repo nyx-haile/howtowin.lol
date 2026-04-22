@@ -2,10 +2,10 @@
 each anchor position.
 
 Architecture:
-  - StaticContextEncoder produces a (B, D) vector prepended as extra token.
+  - StaticContextEncoder produces a small (B, S, D) static token set prepended as prefix tokens.
   - PlayerModelEncoder produces per-participant (B, 10, D) used by
     DynamicStreamEmbedder to fuse player identity into actor tokens.
-  - Causal Transformer over [static_ctx, dynamic_stream].
+  - Causal Transformer over [static_ctx_tokens, dynamic_stream].
   - Next-event head reads at each dynamic position -> (B, L, NUM_EVENT_TYPES).
 """
 import torch
@@ -37,7 +37,7 @@ class CausalTransformerBaseline(nn.Module):
         return torch.triu(torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1)
 
     def forward(self, batch):
-        static = self.static_enc(batch["static"])              # (B, D)
+        static = self.static_enc(batch["static"])              # (B, S, D)
         players = self.player_enc(batch["players"], batch["player_ids"])  # (B, 10, D)
         dyn = self.dyn_emb(
             batch["tokens"], batch["token_actors"],
@@ -45,23 +45,24 @@ class CausalTransformerBaseline(nn.Module):
         )  # (B, L, D)
 
         B, L, D = dyn.shape
-        static_tok = static.unsqueeze(1)  # (B, 1, D)
-        seq = torch.cat([static_tok, dyn], dim=1)  # (B, 1+L, D)
+        static_len = static.size(1)
+        seq = torch.cat([static, dyn], dim=1)  # (B, S+L, D)
 
-        # Causal mask over seq; static token at position 0 is always visible.
-        mask = self._causal_mask(1 + L, seq.device)
+        # Causal mask over seq; static prefix tokens are always visible.
+        mask = self._causal_mask(static_len + L, seq.device)
+        mask[:static_len, :static_len] = False
 
-        # Key-padding mask: static never padded; dynamic uses key_pad_mask.
+        # Key-padding mask: static tokens are never padded; dynamic uses key_pad_mask.
         key_pad_mask = batch.get("key_pad_mask")
         if key_pad_mask is not None:
             pad = torch.cat([
-                torch.zeros(B, 1, dtype=torch.bool, device=seq.device),
+                torch.zeros(B, static_len, dtype=torch.bool, device=seq.device),
                 key_pad_mask,
             ], dim=1)
         else:
             pad = None
 
         out = self.transformer(seq, mask=mask, src_key_padding_mask=pad)
-        # Drop the static prefix position for the head.
-        out = out[:, 1:, :]  # (B, L, D)
+        # Drop the static prefix positions for the head.
+        out = out[:, static_len:, :]  # (B, L, D)
         return self.head(out)  # (B, L, NUM_EVENT_TYPES)

@@ -2,4 +2,13 @@ name = "howtowin"
 compatibility_date = "2026-04-18"
 pages_build_output_dir = ".svelte-kit/cloudflare"
 
-# Configure a Cloudflare Pages/Workers D1 binding named WAITLIST_DB for waitlist signups.
+# Cloudflare Pages D1 binding for waitlist signups.
+[[env.production.d1_databases]]
+binding = "WAITLIST_DB"
+database_name = "howl-waitlist"
+database_id = "2a4c35fd-2fb3-4a7b-a6f4-59a8212e9262"
+
+[[env.preview.d1_databases]]
+binding = "WAITLIST_DB"
+database_name = "howl-waitlist-preview"
+database_id = "e7bf7f79-5d8d-469f-b59f-d379a3bb06bc"

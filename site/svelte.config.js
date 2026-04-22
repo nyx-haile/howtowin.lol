@@ -1,3 +1,4 @@
+import './scripts/node-file-polyfill.js';
 import adapter from '@sveltejs/adapter-cloudflare';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 

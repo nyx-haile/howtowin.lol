@@ -1,7 +1,7 @@
-"""Static-only retrieval baseline: kNN on PlanBModel.static_to_h(static_enc(static)).
+"""Static-only retrieval baseline: kNN on a pooled tokenized static-context key.
 
-The 'key' is a per-GAME 512-dim vector (the value the RSSM uses to seed
-h_0), copied per anchor for shape parity with the headline index.
+The key is a per-game 512-dim summary derived only from the tokenized static
+context stream, copied per anchor for shape parity with the headline index.
 
 See spec: docs/superpowers/specs/2026-04-17-m4-retrieval-check-design.md.
 """
@@ -19,9 +19,8 @@ from model.plan_b_model import D_H
 @torch.no_grad()
 def _encode_game_static_key(model, batch) -> torch.Tensor:
     """Return (D_H,) static-only key for a single-game batch."""
-    static_enc = model.static_enc(batch["static"])         # (1, D_MODEL)
-    h0 = model.static_to_h(static_enc)                     # (1, D_H)
-    return h0[0].detach().cpu()
+    static_summary = model.encode_static_summary(batch["static"])  # (1, D_H)
+    return static_summary[0].detach().cpu()
 
 
 @torch.no_grad()
