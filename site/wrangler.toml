@@ -1,3 +1,5 @@
 name = "howtowin"
 compatibility_date = "2026-04-18"
 pages_build_output_dir = ".svelte-kit/cloudflare"
+
+# Configure a Cloudflare Pages/Workers D1 binding named WAITLIST_DB for waitlist signups.
