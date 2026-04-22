@@ -3,7 +3,6 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 from model.dataset import collate_games
-from model.rollout import rollout_prior
 
 
 @torch.no_grad()
@@ -14,11 +13,11 @@ def outcome_auc_by_minute(model, ds, minutes=(5, 10, 15, 20, 25)):
     y_score = {m: [] for m in minutes}
     for batch in loader:
         out = model(batch)
-        T = out["n_anchors"]
+        n_anchors = int(batch["anchor_mask"][0].sum().item())
         truth = float(batch["outcome"][0].item())
         scores = torch.sigmoid(out["outcome_logits"])[0]
         for m in minutes:
-            if m < T:
+            if m < n_anchors:
                 y_true[m].append(truth)
                 y_score[m].append(scores[m].item())
     model.train()
@@ -33,27 +32,37 @@ def outcome_auc_by_minute(model, ds, minutes=(5, 10, 15, 20, 25)):
 
 @torch.no_grad()
 def imagination_rollout_top5(model, ds, n_steps: int = 3):
-    """Teacher-force up to an anchor, roll forward in latent space, and measure
-    coarse event-type top-5 accuracy for future anchors."""
+    """Teacher-force to a real anchor, then roll forward with true future event windows."""
     model.eval()
     loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
     per_step_hits = [[] for _ in range(n_steps)]
 
     for batch in loader:
         out = model(batch)
-        T = out["n_anchors"]
-        if T < 2 + n_steps:
+        n_anchors = int(batch["anchor_mask"][0].sum().item())
+        if n_anchors < 2 + n_steps:
             continue
-        seed_t = T - n_steps - 1
-        z_seed = out["post_mu"][:, seed_t]
-        h_seed = out["h"][:, seed_t]
-        steps = rollout_prior(model.rssm, h_seed, z_seed, n_steps=n_steps, action_summary=None)
-        for si, (_h, z, _mu, _lv) in enumerate(steps):
-            target_t = T - n_steps + si
+
+        seed_t = n_anchors - n_steps - 1
+        steps = model.rollout_prior_single(
+            h0=out["h"][0, seed_t],
+            z0=out["z"][0, seed_t],
+            static_tokens=out["static_tokens"][0],
+            token_embeddings=out["token_embeddings"][0],
+            event_window_positions=batch["event_window_positions"],
+            event_window_offsets=batch["event_window_offsets"][0],
+            event_window_counts=batch["event_window_counts"][0],
+            anchor_mask=batch["anchor_mask"][0],
+            start_anchor=seed_t,
+            n_steps=n_steps,
+        )
+        for si, step in enumerate(steps):
+            target_t = seed_t + si + 1
             target = int(batch["next_event_type_labels"][0, target_t].item())
             if target <= 0:
                 continue
-            type_logits = model.head_event(z)["type_logits"][0, 1:]
+            decoded = model.decode_anchor_repr(step["anchor_repr"])
+            type_logits = decoded["event_factors"]["type_logits"][0, 1:]
             top5 = torch.topk(type_logits, k=min(5, type_logits.numel())).indices.tolist()
             per_step_hits[si].append(1.0 if (target - 1) in top5 else 0.0)
 
@@ -72,6 +81,7 @@ def frozen_minute_0_auc(model, ds, target_minute: int = 15) -> float:
         frozen_batch["tokens"] = torch.zeros_like(batch["tokens"])
         frozen_batch["token_actors"] = torch.zeros_like(batch["token_actors"])
         frozen_batch["token_targets"] = torch.zeros_like(batch["token_targets"])
+        frozen_batch["token_timestamps"] = torch.zeros_like(batch["token_timestamps"])
         frozen_batch["token_item_ids"] = torch.zeros_like(batch["token_item_ids"])
         frozen_batch["token_skill_slots"] = torch.zeros_like(batch["token_skill_slots"])
         frozen_batch["token_monster_types"] = torch.zeros_like(batch["token_monster_types"])
@@ -80,13 +90,14 @@ def frozen_minute_0_auc(model, ds, target_minute: int = 15) -> float:
         frozen_batch["token_lane_types"] = torch.zeros_like(batch["token_lane_types"])
         frozen_batch["token_tower_types"] = torch.zeros_like(batch["token_tower_types"])
         frozen_batch["token_ward_types"] = torch.zeros_like(batch["token_ward_types"])
-        frozen_batch["event_window_embeddings_raw"] = torch.zeros_like(batch["event_window_embeddings_raw"])
-        frozen_batch["window_mask"] = torch.zeros_like(batch["window_mask"])
+        frozen_batch["event_window_positions"] = torch.zeros(0, dtype=torch.long)
+        frozen_batch["event_window_offsets"] = torch.zeros_like(batch["event_window_offsets"])
+        frozen_batch["event_window_counts"] = torch.zeros_like(batch["event_window_counts"])
         frozen_batch["frame_features"] = torch.zeros_like(batch["frame_features"])
         frozen_batch["anchor_macro_features"] = torch.zeros_like(batch["anchor_macro_features"])
         out = model(frozen_batch)
-        T = out["n_anchors"]
-        if target_minute < T:
+        n_anchors = int(batch["anchor_mask"][0].sum().item())
+        if target_minute < n_anchors:
             y_true.append(float(batch["outcome"][0].item()))
             y_score.append(torch.sigmoid(out["outcome_logits"])[0, target_minute].item())
     model.train()

@@ -493,9 +493,9 @@ def collate_games(samples):
         key_pad[b, :L] = False
 
     max_T = max(s["anchor_positions"].shape[0] for s in samples)
-    max_W = 128
 
     anchor_positions = torch.zeros(B, max_T, dtype=torch.long)
+    anchor_mask = torch.zeros(B, max_T, dtype=torch.bool)
     frame_features = torch.zeros(B, max_T, 10, FRAME_FEAT_DIM, dtype=torch.float32)
     anchor_macro_features = torch.zeros(B, max_T, MACRO_FEAT_DIM, dtype=torch.float32)
     decision_labels = torch.full((B, max_T, 10), NO_DECISION, dtype=torch.long)
@@ -510,12 +510,14 @@ def collate_games(samples):
     next_event_lane_type_labels = torch.zeros(B, max_T, dtype=torch.long)
     next_event_tower_type_labels = torch.zeros(B, max_T, dtype=torch.long)
     next_event_ward_type_labels = torch.zeros(B, max_T, dtype=torch.long)
-    event_window_raw = torch.zeros(B, max_T, max_W, dtype=torch.long)
-    window_mask = torch.zeros(B, max_T, max_W, dtype=torch.float32)
+    event_window_offsets = torch.zeros(B, max_T, dtype=torch.long)
+    event_window_counts = torch.zeros(B, max_T, dtype=torch.long)
+    flat_event_positions: list[int] = []
 
     for bi, s in enumerate(samples):
         T = s["anchor_positions"].shape[0]
         anchor_positions[bi, :T] = torch.from_numpy(s["anchor_positions"])
+        anchor_mask[bi, :T] = True
         frame_features[bi, :T] = torch.from_numpy(s["frame_features"])
         anchor_macro_features[bi, :T] = torch.from_numpy(s["anchor_macro_features"])
         decision_labels[bi, :T] = torch.from_numpy(s["decision_labels"])
@@ -531,9 +533,11 @@ def collate_games(samples):
         next_event_tower_type_labels[bi, :T] = torch.from_numpy(s["next_event_tower_type_labels"])
         next_event_ward_type_labels[bi, :T] = torch.from_numpy(s["next_event_ward_type_labels"])
         for ti, positions in enumerate(s["window_positions"]):
-            positions = positions[:max_W]
-            event_window_raw[bi, ti, :len(positions)] = torch.tensor(positions, dtype=torch.long)
-            window_mask[bi, ti, :len(positions)] = 1.0
+            event_window_offsets[bi, ti] = len(flat_event_positions)
+            event_window_counts[bi, ti] = len(positions)
+            flat_event_positions.extend(int(pos) for pos in positions)
+
+    event_window_positions = torch.tensor(flat_event_positions, dtype=torch.long) if flat_event_positions else torch.zeros(0, dtype=torch.long)
 
     return {
         "static": torch.stack([s["static"] for s in samples]),
@@ -555,8 +559,10 @@ def collate_games(samples):
         "label_mask": mask,
         "key_pad_mask": key_pad,
         "anchor_positions": anchor_positions,
-        "event_window_embeddings_raw": event_window_raw,
-        "window_mask": window_mask,
+        "anchor_mask": anchor_mask,
+        "event_window_positions": event_window_positions,
+        "event_window_offsets": event_window_offsets,
+        "event_window_counts": event_window_counts,
         "frame_features": frame_features,
         "anchor_macro_features": anchor_macro_features,
         "decision_labels": decision_labels,

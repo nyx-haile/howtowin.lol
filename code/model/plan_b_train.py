@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader
 
 from model.dataset import MatchDataset, build_puuid_index, collate_games
 from model.plan_b_model import D_Z, PlanBModel
-from model.rollout import rollout_prior
 from model.rssm import free_bits_kl
 from model.tokens import EVENT_TYPE_TO_ID, event_label_from_type_id
 
@@ -48,9 +47,30 @@ def _frame_delta_labels(batch):
     return ff[:, 1:] - ff[:, :-1]
 
 
+def _anchor_mask(batch) -> torch.Tensor:
+    return batch["anchor_mask"].bool()
+
+
+def _transition_mask(batch) -> torch.Tensor:
+    mask = _anchor_mask(batch)
+    return mask[:, :-1] & mask[:, 1:]
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.bool()
+    if values.dim() < mask.dim():
+        raise ValueError("mask has more dimensions than values")
+    expanded = mask
+    while expanded.dim() < values.dim():
+        expanded = expanded.unsqueeze(-1)
+    expanded = expanded.expand_as(values)
+    if not expanded.any():
+        return values.sum() * 0.0
+    return values.masked_select(expanded).mean()
+
+
 def _masked_ce(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    if mask.dtype != torch.bool:
-        mask = mask.bool()
+    mask = mask.bool()
     if not mask.any():
         return logits.sum() * 0.0
     return F.cross_entropy(logits[mask], targets[mask], reduction="mean")
@@ -58,6 +78,7 @@ def _masked_ce(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) 
 
 def _event_loss_components(out, batch):
     event = out["event_factors"]
+    anchor_mask = _anchor_mask(batch)
     type_labels = batch["next_event_type_labels"]
     actor_labels = batch["next_event_actor_labels"]
     target_labels = batch["next_event_target_labels"]
@@ -71,65 +92,106 @@ def _event_loss_components(out, batch):
     ward_type_labels = batch["next_event_ward_type_labels"]
 
     losses = []
-    losses.append(F.cross_entropy(event["type_logits"].reshape(-1, event["type_logits"].size(-1)), type_labels.reshape(-1)))
+    losses.append(_masked_ce(event["type_logits"], type_labels, anchor_mask))
 
-    has_event = type_labels > 0
+    has_event = (type_labels > 0) & anchor_mask
     losses.append(_masked_ce(event["actor_logits"], actor_labels, has_event))
     losses.append(_masked_ce(event["target_logits"], target_labels, has_event))
-    losses.append(_masked_ce(event["item_logits"], item_labels, type_labels == ITEM_EVENT_LABEL))
-    losses.append(_masked_ce(event["skill_logits"], skill_labels, type_labels == SKILL_EVENT_LABEL))
-    losses.append(_masked_ce(event["monster_type_logits"], monster_type_labels, type_labels == MONSTER_EVENT_LABEL))
-    losses.append(_masked_ce(event["monster_subtype_logits"], monster_subtype_labels, type_labels == MONSTER_EVENT_LABEL))
-    losses.append(_masked_ce(event["building_type_logits"], building_type_labels, type_labels == BUILDING_EVENT_LABEL))
-    losses.append(_masked_ce(event["lane_type_logits"], lane_type_labels, type_labels == BUILDING_EVENT_LABEL))
-    losses.append(_masked_ce(event["tower_type_logits"], tower_type_labels, type_labels == BUILDING_EVENT_LABEL))
-    ward_mask = (type_labels == WARD_PLACED_EVENT_LABEL) | (type_labels == WARD_KILL_EVENT_LABEL)
+    losses.append(_masked_ce(event["item_logits"], item_labels, (type_labels == ITEM_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["skill_logits"], skill_labels, (type_labels == SKILL_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["monster_type_logits"], monster_type_labels, (type_labels == MONSTER_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["monster_subtype_logits"], monster_subtype_labels, (type_labels == MONSTER_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["building_type_logits"], building_type_labels, (type_labels == BUILDING_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["lane_type_logits"], lane_type_labels, (type_labels == BUILDING_EVENT_LABEL) & anchor_mask))
+    losses.append(_masked_ce(event["tower_type_logits"], tower_type_labels, (type_labels == BUILDING_EVENT_LABEL) & anchor_mask))
+    ward_mask = ((type_labels == WARD_PLACED_EVENT_LABEL) | (type_labels == WARD_KILL_EVENT_LABEL)) & anchor_mask
     losses.append(_masked_ce(event["ward_type_logits"], ward_type_labels, ward_mask))
     return torch.stack(losses).mean()
 
 
 def _compute_losses(out, batch):
     losses = {}
+    anchor_mask = _anchor_mask(batch)
+    transition_mask = _transition_mask(batch)
+
     losses["next_event"] = _event_loss_components(out, batch)
 
     outcome_pred = out["outcome_logits"]
     outcome_targ = _outcome_labels(batch)
-    losses["outcome"] = F.binary_cross_entropy_with_logits(outcome_pred, outcome_targ)
+    if anchor_mask.any():
+        losses["outcome"] = F.binary_cross_entropy_with_logits(outcome_pred[anchor_mask], outcome_targ[anchor_mask])
+    else:
+        losses["outcome"] = outcome_pred.sum() * 0.0
 
     dec_logits = out["decision_logits"]
     dec_logits_full = F.pad(dec_logits, (0, 1))
-    losses["next_decision"] = F.cross_entropy(dec_logits_full.view(-1, 7), batch["decision_labels"].view(-1).long())
+    dec_targets = batch["decision_labels"].long()
+    dec_mask = anchor_mask.unsqueeze(-1).expand_as(dec_targets)
+    if dec_mask.any():
+        losses["next_decision"] = F.cross_entropy(dec_logits_full[dec_mask], dec_targets[dec_mask], reduction="mean")
+    else:
+        losses["next_decision"] = dec_logits_full.sum() * 0.0
 
     mu = out["frame_mu"][:, :-1]
     logvar = out["frame_logvar"][:, :-1]
     target = _frame_delta_labels(batch)
     gauss_nll = 0.5 * (logvar + (target - mu).pow(2) / logvar.exp())
-    losses["next_frame"] = gauss_nll.mean()
+    losses["next_frame"] = _masked_mean(gauss_nll, transition_mask)
 
     kl = free_bits_kl(
         out["post_mu"].reshape(-1, D_Z), out["post_logvar"].reshape(-1, D_Z),
         out["prior_mu"].reshape(-1, D_Z), out["prior_logvar"].reshape(-1, D_Z),
         free_bits_per_dim=FREE_BITS_PER_DIM,
-    )
-    losses["kl"] = kl.mean()
+    ).view_as(anchor_mask)
+    losses["kl"] = _masked_mean(kl, anchor_mask)
     return losses
 
 
 def _rollout_aux_loss(model, out, batch):
     if ROLLOUT_STEPS == 0:
         return torch.tensor(0.0, device=out["event_logits"].device)
-    steps = rollout_prior(model.rssm, out["h_final"], out["z_final"], n_steps=ROLLOUT_STEPS, action_summary=None)
-    last_type = batch["next_event_type_labels"][:, -1]
-    last_outcome = _outcome_labels(batch)[:, -1]
-    total = 0.0
-    for (_h, z, _mu, _lv), w in zip(steps, ROLLOUT_LOSS_WEIGHTS):
-        ev = model.head_event(z)
-        oc_logits = model.head_outcome(z)
-        total = total + w * (
-            F.cross_entropy(ev["type_logits"], last_type) +
-            F.binary_cross_entropy_with_logits(oc_logits, last_outcome)
+
+    device = out["event_logits"].device
+    anchor_mask = _anchor_mask(batch)
+    total = torch.tensor(0.0, device=device)
+    weight_total = 0.0
+
+    for b in range(anchor_mask.size(0)):
+        n_anchors = int(anchor_mask[b].sum().item())
+        if n_anchors < 2 + ROLLOUT_STEPS:
+            continue
+
+        seed_t = n_anchors - ROLLOUT_STEPS - 1
+        rollout_steps = model.rollout_prior_single(
+            h0=out["h"][b, seed_t],
+            z0=out["z"][b, seed_t],
+            static_tokens=out["static_tokens"][b],
+            token_embeddings=out["token_embeddings"][b],
+            event_window_positions=batch["event_window_positions"],
+            event_window_offsets=batch["event_window_offsets"][b],
+            event_window_counts=batch["event_window_counts"][b],
+            anchor_mask=anchor_mask[b],
+            start_anchor=seed_t,
+            n_steps=ROLLOUT_STEPS,
         )
-    return total
+
+        for step_idx, step_out in enumerate(rollout_steps):
+            target_t = seed_t + step_idx + 1
+            decoded = model.decode_anchor_repr(step_out["anchor_repr"])
+            event_type_logits = decoded["event_factors"]["type_logits"]
+            outcome_logits = decoded["outcome_logits"]
+            true_event = batch["next_event_type_labels"][b:b + 1, target_t]
+            true_outcome = batch["outcome"][b:b + 1]
+            weight = ROLLOUT_LOSS_WEIGHTS[step_idx]
+            total = total + weight * (
+                F.cross_entropy(event_type_logits, true_event)
+                + F.binary_cross_entropy_with_logits(outcome_logits, true_outcome)
+            )
+            weight_total += weight
+
+    if weight_total == 0.0:
+        return total
+    return total / weight_total
 
 
 def _combined_loss(losses, rollout_aux):
@@ -154,11 +216,14 @@ def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> f
     for batch in loader:
         batch = _batch_to_device(batch, device)
         out = model(batch)
-        T = out["n_anchors"]
-        minute_idx = min(target_minute, T - 1)
-        probs = torch.sigmoid(out["outcome_logits"])[:, minute_idx]
+        if target_minute >= out["outcome_logits"].size(1):
+            continue
+        valid = batch["anchor_mask"][:, target_minute].bool()
+        if not valid.any():
+            continue
+        probs = torch.sigmoid(out["outcome_logits"][valid, target_minute])
         y_score.extend(probs.cpu().tolist())
-        y_true.extend(batch["outcome"].cpu().tolist())
+        y_true.extend(batch["outcome"][valid].cpu().tolist())
     model.train()
     if len(set(y_true)) < 2:
         return 0.5

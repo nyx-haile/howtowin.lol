@@ -54,19 +54,23 @@ def test_collate_emits_anchor_windowing_tensors(fixture_match_id):
     assert batch["decision_labels"].shape == (B, T, 10)
     assert batch["decision_labels"].dtype == torch.long
 
-    assert batch["event_window_embeddings_raw"].shape[0] == B
-    assert batch["event_window_embeddings_raw"].shape[1] == T
-    assert batch["event_window_embeddings_raw"].shape[2] == 128
-    assert batch["event_window_embeddings_raw"].dtype == torch.long
+    assert batch["anchor_mask"].shape == (B, T)
+    assert batch["anchor_mask"].dtype == torch.bool
 
-    assert batch["window_mask"].shape == (B, T, 128)
-    assert batch["window_mask"].dtype == torch.float32
+    assert batch["event_window_positions"].dim() == 1
+    assert batch["event_window_positions"].dtype == torch.long
+
+    assert batch["event_window_offsets"].shape == (B, T)
+    assert batch["event_window_offsets"].dtype == torch.long
+
+    assert batch["event_window_counts"].shape == (B, T)
+    assert batch["event_window_counts"].dtype == torch.long
 
     assert batch["outcome"].shape == (B,)
     assert batch["outcome"].dtype == torch.float32
     assert batch["outcome"][0] in (0.0, 1.0)
 
-    # At least some window positions should be non-zero.
-    assert batch["window_mask"].sum() > 0
+    # At least some event positions should be present.
+    assert batch["event_window_counts"].sum() > 0
     # At least some frame features should be non-zero (gold, xp, etc.).
     assert batch["frame_features"].abs().sum() > 0

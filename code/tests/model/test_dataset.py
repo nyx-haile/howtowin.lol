@@ -48,5 +48,7 @@ def test_collate_batches_games(fixture_match_id):
     assert batch["static"].shape == (2, STATIC_VECTOR_DIM)
     assert batch["players"].shape[0] == 2
     assert batch["tokens"].shape[0] == 2
+    assert batch["anchor_mask"].shape[:1] == (2,)
     assert batch["anchor_macro_features"].shape[0] == 2
+    assert batch["event_window_positions"].dtype == torch.long
     assert batch["tokens"].shape[1] == batch["labels"].shape[1]
