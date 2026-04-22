@@ -16,7 +16,8 @@ import torch
 from torch.utils.data import Dataset
 
 from db import get_conn
-from raw_db import get_raw_match
+from raw_db import get_raw_match_only
+from model.player_match_stats import PLAYER_MATCH_STATS_TABLE, ensure_player_match_stats
 from model.cold_holdout import load_player_cold_holdout
 from model.patch_params import PATCH_VECTOR_DIM
 from model.player_features import PLAYER_FEATURE_DIM, player_feature_vector
@@ -87,6 +88,11 @@ MACRO_FEAT_SCALE = np.array(
     [25000.0, 25000.0, 30.0, 11.0, 15.0, 6.0, 3.0, 3.0, 10.0, 6.0, 6.0, 1.0,
      15000.0, 15000.0, 8000.0, 15000.0, 15000.0, 8000.0],
     dtype=np.float32,
+)
+OBJECTIVE_EVENT_TYPES_SQL = (
+    "BUILDING_KILL",
+    "ELITE_MONSTER_KILL",
+    "TURRET_PLATE_DESTROYED",
 )
 
 SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits')
@@ -190,13 +196,14 @@ class MatchDataset(Dataset):
             return {}
         conn = get_conn()
         try:
+            ensure_player_match_stats(conn)
             puuids = set()
             chunk_size = 900
             for i in range(0, len(self.match_ids), chunk_size):
                 chunk = self.match_ids[i:i + chunk_size]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = conn.execute(
-                    f"SELECT DISTINCT puuid FROM frames WHERE match_id IN ({placeholders})",
+                    f"SELECT DISTINCT puuid FROM {PLAYER_MATCH_STATS_TABLE} WHERE match_id IN ({placeholders})",
                     chunk,
                 ).fetchall()
                 puuids.update(r["puuid"] for r in rows)
@@ -238,9 +245,9 @@ class MatchDataset(Dataset):
         token_tower_types = torch.tensor([t.tower_type_id for t in tokens], dtype=torch.long)
         token_ward_types = torch.tensor([t.ward_type_id for t in tokens], dtype=torch.long)
 
-        static = torch.tensor(build_static_feature_vector(mid), dtype=torch.float32)
+        match = get_raw_match_only(mid)
+        static = torch.tensor(build_static_feature_vector(mid, match=match), dtype=torch.float32)
 
-        match, _ = get_raw_match(mid)
         players = torch.zeros(10, PLAYER_FEATURE_DIM, dtype=torch.float32)
         player_ids = torch.zeros(10, dtype=torch.long)
         if match:
@@ -255,15 +262,18 @@ class MatchDataset(Dataset):
 
         conn = get_conn()
         try:
+            objective_placeholders = ",".join("?" for _ in OBJECTIVE_EVENT_TYPES_SQL)
             all_frame_rows = conn.execute(
                 "SELECT timestamp_ms, participant_slot, team_id, current_gold, total_gold, xp, level, cs, jungle_cs, pos_x, pos_y, kills, deaths, assists "
                 "FROM frames WHERE match_id = ? AND participant_slot BETWEEN 1 AND 10",
                 (mid,),
             ).fetchall()
             all_event_rows = conn.execute(
-                "SELECT timestamp_ms, event_type, killer_team, team_id, details "
-                "FROM events WHERE match_id = ? ORDER BY timestamp_ms",
-                (mid,),
+                f"SELECT timestamp_ms, event_type, killer_team, team_id, details "
+                f"FROM events "
+                f"WHERE match_id = ? AND event_type IN ({objective_placeholders}) "
+                f"ORDER BY timestamp_ms",
+                (mid, *OBJECTIVE_EVENT_TYPES_SQL),
             ).fetchall()
             game_row = conn.execute(
                 "SELECT winning_team FROM games WHERE match_id = ?",
@@ -591,13 +601,14 @@ def build_puuid_index(match_ids, max_puuids=20000):
         return {}
     conn = get_conn()
     try:
+        ensure_player_match_stats(conn)
         chunk_size = 900
         for i in range(0, len(match_ids), chunk_size):
             chunk = match_ids[i:i + chunk_size]
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
-                f"SELECT DISTINCT match_id, puuid FROM frames "
-                f"WHERE match_id IN ({placeholders}) AND participant_slot BETWEEN 1 AND 10",
+                f"SELECT puuid FROM {PLAYER_MATCH_STATS_TABLE} "
+                f"WHERE match_id IN ({placeholders})",
                 chunk,
             ).fetchall()
             for r in rows:
@@ -609,7 +620,7 @@ def build_puuid_index(match_ids, max_puuids=20000):
 
 
 def puuid_ids_for_match(match_id, puuid_index):
-    match, _ = get_raw_match(match_id)
+    match = get_raw_match_only(match_id)
     ids = torch.zeros(10, dtype=torch.long)
     if match:
         for i, p in enumerate(match["info"]["participants"][:10]):

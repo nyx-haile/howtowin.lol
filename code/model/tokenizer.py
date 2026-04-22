@@ -34,6 +34,7 @@ MEANINGFUL_EVENT_TYPES = {
     "CHAMPION_KILL", "BUILDING_KILL", "ELITE_MONSTER_KILL", "CHAMPION_SPECIAL_KILL",
     "ITEM_PURCHASED", "SKILL_LEVEL_UP", "WARD_PLACED", "WARD_KILL",
 }
+MEANINGFUL_EVENT_TYPES_SQL = tuple(sorted(MEANINGFUL_EVENT_TYPES))
 
 
 @dataclass
@@ -53,11 +54,14 @@ class Token:
 
 
 def _load_events(conn, match_id):
+    placeholders = ",".join("?" for _ in MEANINGFUL_EVENT_TYPES_SQL)
     rows = conn.execute(
-        """SELECT timestamp_ms, event_type, participant_id, killer_id, victim_id,
+        f"""SELECT timestamp_ms, event_type, participant_id, killer_id, victim_id,
                   killer_team, team_id, position_x, position_y, details
-           FROM events WHERE match_id = ? ORDER BY timestamp_ms""",
-        (match_id,)
+           FROM events
+           WHERE match_id = ? AND event_type IN ({placeholders})
+           ORDER BY timestamp_ms""",
+        (match_id, *MEANINGFUL_EVENT_TYPES_SQL)
     ).fetchall()
     out = []
     for row in rows:

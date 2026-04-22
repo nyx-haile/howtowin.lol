@@ -42,18 +42,29 @@ def insert_raw_match(conn, match_id, match_dict, timeline_dict):
     )
 
 
-def get_raw_match(match_id, db_path=None):
+def get_raw_match(match_id, db_path=None, include_timeline=True):
     conn = get_raw_conn(db_path)
-    row = conn.execute(
-        "SELECT match_json, timeline_json FROM raw_matches WHERE match_id = ?",
-        (match_id,)
-    ).fetchone()
+    if include_timeline:
+        row = conn.execute(
+            "SELECT match_json, timeline_json FROM raw_matches WHERE match_id = ?",
+            (match_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT match_json FROM raw_matches WHERE match_id = ?",
+            (match_id,)
+        ).fetchone()
     conn.close()
     if row is None:
         return None, None
     match = json.loads(gzip.decompress(row[0]).decode())
-    timeline = json.loads(gzip.decompress(row[1]).decode())
+    timeline = json.loads(gzip.decompress(row[1]).decode()) if include_timeline else None
     return match, timeline
+
+
+def get_raw_match_only(match_id, db_path=None):
+    match, _timeline = get_raw_match(match_id, db_path=db_path, include_timeline=False)
+    return match
 
 
 if __name__ == "__main__":

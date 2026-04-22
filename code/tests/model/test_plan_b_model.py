@@ -95,3 +95,23 @@ def test_forward_zeroes_padded_anchor_outputs(fixture_match_id):
 
     assert batch["anchor_mask"][1, short_T:].sum().item() == 0
     assert torch.allclose(out["anchor_repr"][1, short_T:], torch.zeros_like(out["anchor_repr"][1, short_T:]))
+
+
+def test_gather_event_window_handles_variable_counts_without_python_loop():
+    model = PlanBModel(max_puuids=8)
+    token_emb = torch.arange(2 * 6 * D_MODEL, dtype=torch.float32).view(2, 6, D_MODEL)
+    batch = {
+        "event_window_offsets": torch.tensor([[0, 2], [3, 4]], dtype=torch.long),
+        "event_window_counts": torch.tensor([[2, 1], [1, 0]], dtype=torch.long),
+        "event_window_positions": torch.tensor([1, 3, 4, 2], dtype=torch.long),
+    }
+
+    events0, mask0 = model._gather_event_window(token_emb, batch, 0)
+    assert mask0.tolist() == [[True, True], [True, False]]
+    assert torch.equal(events0[0, 0], token_emb[0, 1])
+    assert torch.equal(events0[0, 1], token_emb[0, 3])
+    assert torch.equal(events0[1, 0], token_emb[1, 2])
+
+    events1, mask1 = model._gather_event_window(token_emb, batch, 1)
+    assert mask1.tolist() == [[True], [False]]
+    assert torch.equal(events1[0, 0], token_emb[0, 4])

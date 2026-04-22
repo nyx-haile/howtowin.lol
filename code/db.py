@@ -80,7 +80,39 @@ def init_db(db_path=None):
 
         CREATE INDEX IF NOT EXISTS idx_events_match ON events(match_id);
         CREATE INDEX IF NOT EXISTS idx_events_type ON events(match_id, event_type);
+        CREATE INDEX IF NOT EXISTS idx_events_match_ts ON events(match_id, timestamp_ms);
+        CREATE INDEX IF NOT EXISTS idx_events_meaningful_match_ts
+            ON events(match_id, timestamp_ms)
+            WHERE event_type IN (
+                'CHAMPION_KILL', 'BUILDING_KILL', 'ELITE_MONSTER_KILL',
+                'CHAMPION_SPECIAL_KILL', 'ITEM_PURCHASED',
+                'SKILL_LEVEL_UP', 'WARD_PLACED', 'WARD_KILL'
+            );
+        CREATE INDEX IF NOT EXISTS idx_events_objective_match_ts
+            ON events(match_id, timestamp_ms)
+            WHERE event_type IN (
+                'ELITE_MONSTER_KILL', 'BUILDING_KILL', 'TURRET_PLATE_DESTROYED'
+            );
         CREATE INDEX IF NOT EXISTS idx_frames_puuid ON frames(puuid, timestamp_ms);
+
+        CREATE TABLE IF NOT EXISTS player_match_stats (
+            puuid TEXT,
+            match_id TEXT,
+            team_id INTEGER,
+            role TEXT,
+            created_at INTEGER,
+            winning_team INTEGER,
+            window_10_rows INTEGER DEFAULT 0,
+            kda_10_sum REAL DEFAULT 0.0,
+            cs_10_sum REAL DEFAULT 0.0,
+            total_gold_10_sum REAL DEFAULT 0.0,
+            ward_count_10_sum REAL DEFAULT 0.0,
+            PRIMARY KEY (puuid, match_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_player_match_stats_match
+            ON player_match_stats(match_id, puuid);
+        CREATE INDEX IF NOT EXISTS idx_player_match_stats_puuid_created
+            ON player_match_stats(puuid, created_at, match_id);
 
         CREATE TABLE IF NOT EXISTS concepts (
             concept_id TEXT PRIMARY KEY,

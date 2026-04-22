@@ -21,6 +21,7 @@ Fields (total 16):
 import numpy as np
 
 from db import get_conn
+from model.player_match_stats import PLAYER_MATCH_STATS_TABLE, ensure_player_match_stats
 
 PLAYER_FEATURE_DIM = 16
 
@@ -44,10 +45,10 @@ def _causal_cutoff(conn, puuid, exclude_match_ids):
         return None
     placeholders = ",".join("?" for _ in exclude_match_ids)
     row = conn.execute(
-        f"""SELECT MIN(g.created_at) AS cutoff
-            FROM frames f JOIN games g USING(match_id)
-            WHERE f.puuid = ? AND f.match_id IN ({placeholders})
-            GROUP BY f.puuid""",
+        f"""SELECT MIN(created_at) AS cutoff
+            FROM {PLAYER_MATCH_STATS_TABLE}
+            WHERE puuid = ? AND match_id IN ({placeholders})
+            GROUP BY puuid""",
         (puuid, *exclude_match_ids),
     ).fetchone()
     if row is None:
@@ -59,6 +60,7 @@ def player_feature_vector(puuid, exclude_match_ids=None):
     vec = np.zeros(PLAYER_FEATURE_DIM, dtype=np.float32)
     conn = get_conn()
     try:
+        ensure_player_match_stats(conn)
         prow = conn.execute(
             "SELECT rank_tier, lp FROM players WHERE puuid = ?", (puuid,)
         ).fetchone()
@@ -73,51 +75,38 @@ def player_feature_vector(puuid, exclude_match_ids=None):
         # Determine causal cutoff timestamp for this puuid.
         cutoff = _causal_cutoff(conn, puuid, exclude_match_ids)
 
-        # Games in corpus for this puuid (with causal filter).
+        where_clause = f"puuid = ?"
+        params = [puuid]
         if cutoff is not None:
-            games = conn.execute(
-                """SELECT f.match_id, f.team_id, g.winning_team
-                   FROM frames f JOIN games g USING(match_id)
-                   WHERE f.puuid = ? AND g.created_at < ?
-                   GROUP BY f.match_id""",
-                (puuid, cutoff),
-            ).fetchall()
-        else:
-            games = conn.execute(
-                """SELECT f.match_id, f.team_id, g.winning_team
-                   FROM frames f JOIN games g USING(match_id)
-                   WHERE f.puuid = ? GROUP BY f.match_id""",
-                (puuid,),
-            ).fetchall()
-        n = len(games)
+            where_clause += " AND created_at < ?"
+            params.append(cutoff)
+
+        agg = conn.execute(
+            f"""SELECT
+                    COUNT(*) AS games_in_corpus,
+                    SUM(CASE WHEN team_id = winning_team THEN 1 ELSE 0 END) AS wins_in_corpus,
+                    SUM(window_10_rows) AS window_rows,
+                    SUM(kda_10_sum) AS kda_10_sum,
+                    SUM(cs_10_sum) AS cs_10_sum,
+                    SUM(total_gold_10_sum) AS total_gold_10_sum,
+                    SUM(ward_count_10_sum) AS ward_count_10_sum
+                FROM {PLAYER_MATCH_STATS_TABLE}
+                WHERE {where_clause}""",
+            params,
+        ).fetchone()
+
+        n = int(agg["games_in_corpus"] or 0)
         vec[2] = float(np.log1p(n))
         if n > 0:
-            wins = sum(1 for g in games if g["team_id"] == g["winning_team"])
-            vec[3] = float(wins) / float(n)
+            wins = float(agg["wins_in_corpus"] or 0)
+            vec[3] = wins / float(n)
 
-        # Per-game aggregates at minute 10 (timestamp ~600000ms).
-        if cutoff is not None:
-            rows = conn.execute(
-                """SELECT f.cs, f.total_gold, f.kills, f.deaths, f.assists, f.ward_count
-                   FROM frames f JOIN games g USING(match_id)
-                   WHERE f.puuid = ? AND f.timestamp_ms BETWEEN 540000 AND 660000
-                     AND g.created_at < ?""",
-                (puuid, cutoff),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT cs, total_gold, kills, deaths, assists, ward_count
-                   FROM frames WHERE puuid = ? AND timestamp_ms BETWEEN 540000 AND 660000""",
-                (puuid,),
-            ).fetchall()
-        if rows:
-            cs = [r["cs"] for r in rows]
-            gold = [r["total_gold"] for r in rows]
-            kda = [(r["kills"] + r["assists"]) / max(r["deaths"], 1) for r in rows]
-            vec[4] = float(np.mean(kda))
-            vec[5] = float(np.mean(cs))
-            vec[6] = float(np.mean(gold))
-            vec[8] = float(np.mean([r["ward_count"] for r in rows]))
+        window_rows = float(agg["window_rows"] or 0.0)
+        if window_rows > 0:
+            vec[4] = float(agg["kda_10_sum"] or 0.0) / window_rows
+            vec[5] = float(agg["cs_10_sum"] or 0.0) / window_rows
+            vec[6] = float(agg["total_gold_10_sum"] or 0.0) / window_rows
+            vec[8] = float(agg["ward_count_10_sum"] or 0.0) / window_rows
 
         # Damage placeholder (not populated in frames table; leave 0).
         # Damage will be added when the schema carries it; zero is a safe default.
@@ -125,19 +114,13 @@ def player_feature_vector(puuid, exclude_match_ids=None):
         # Wards killed approximated by ward_count delta; skipping for Plan A.
 
         # Role frequency.
-        if cutoff is not None:
-            roles = conn.execute(
-                """SELECT f.role, COUNT(*) c
-                   FROM frames f JOIN games g USING(match_id)
-                   WHERE f.puuid = ? AND g.created_at < ?
-                   GROUP BY f.role""",
-                (puuid, cutoff),
-            ).fetchall()
-        else:
-            roles = conn.execute(
-                "SELECT role, COUNT(*) c FROM frames WHERE puuid = ? GROUP BY role",
-                (puuid,),
-            ).fetchall()
+        roles = conn.execute(
+            f"""SELECT role, COUNT(*) c
+                FROM {PLAYER_MATCH_STATS_TABLE}
+                WHERE {where_clause}
+                GROUP BY role""",
+            params,
+        ).fetchall()
         total = sum(r["c"] for r in roles) or 1
         for r in roles:
             idx = ROLE_INDEX.get(r["role"])

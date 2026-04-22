@@ -156,8 +156,8 @@ def patch_vector_for_match(match_id, mode=DEFAULT_PATCH_VECTOR_MODE):
         return vec
 
     champs, key_to_name = _champ_lookup(version)
-    from raw_db import get_raw_match
-    match, _tl = get_raw_match(match_id)
+    from raw_db import get_raw_match_only
+    match = get_raw_match_only(match_id)
     if match:
         for i, p in enumerate(match["info"]["participants"][:10]):
             champ_name = key_to_name.get(str(p.get("championId")))

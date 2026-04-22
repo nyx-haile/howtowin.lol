@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from model.dataset import FRAME_FEAT_DIM, MACRO_FEAT_DIM
 from model.encoders import D_MODEL, DynamicStreamEmbedder, PlayerModelEncoder, StaticContextEncoder
@@ -51,12 +52,15 @@ class PlanBModel(nn.Module):
 
         self.h0 = nn.Parameter(torch.zeros(D_H))
         self.z0 = nn.Parameter(torch.zeros(D_Z))
+        self.static_num_heads = 4
+        self.static_head_dim = D_MODEL // self.static_num_heads
+        if self.static_head_dim * self.static_num_heads != D_MODEL:
+            raise ValueError("D_MODEL must be divisible by static_num_heads")
+        self.static_attn_scale = self.static_head_dim ** -0.5
         self.static_step_query = nn.Linear(D_H + D_Z + D_ACTION, D_MODEL)
-        self.static_cross_attn = nn.MultiheadAttention(
-            embed_dim=D_MODEL,
-            num_heads=4,
-            batch_first=True,
-        )
+        self.static_key = nn.Linear(D_MODEL, D_MODEL)
+        self.static_value = nn.Linear(D_MODEL, D_MODEL)
+        self.static_attn_out = nn.Linear(D_MODEL, D_MODEL)
         self.static_to_action = nn.Sequential(
             nn.LayerNorm(D_MODEL),
             nn.Linear(D_MODEL, D_ACTION),
@@ -127,10 +131,32 @@ class PlanBModel(nn.Module):
     def _zero_action(self, batch_size: int, device: torch.device) -> torch.Tensor:
         return torch.zeros(batch_size, D_ACTION, device=device)
 
-    def _static_context(self, h, z, action_input, static_tokens):
-        query = self.static_step_query(torch.cat([h, z, action_input], dim=-1)).unsqueeze(1)
-        context, attn_weights = self.static_cross_attn(query, static_tokens, static_tokens, need_weights=True)
-        return context.squeeze(1), attn_weights.squeeze(1)
+    def _prepare_static_attention(self, static_tokens: torch.Tensor):
+        bsz, n_tokens, _ = static_tokens.shape
+        key = self.static_key(static_tokens).view(
+            bsz, n_tokens, self.static_num_heads, self.static_head_dim
+        ).transpose(1, 2)
+        value = self.static_value(static_tokens).view(
+            bsz, n_tokens, self.static_num_heads, self.static_head_dim
+        ).transpose(1, 2)
+        return key, value
+
+    def _static_context(self, h, z, action_input, static_key, static_value, need_weights: bool = False):
+        bsz = h.size(0)
+        query = self.static_step_query(torch.cat([h, z, action_input], dim=-1)).view(
+            bsz, self.static_num_heads, 1, self.static_head_dim
+        )
+        if need_weights:
+            attn_scores = torch.matmul(query, static_key.transpose(-2, -1)) * self.static_attn_scale
+            attn_weights = attn_scores.softmax(dim=-1)
+            context = torch.matmul(attn_weights, static_value)
+            mean_weights = attn_weights.mean(dim=1).squeeze(1)
+        else:
+            context = F.scaled_dot_product_attention(query, static_key, static_value, dropout_p=0.0)
+            mean_weights = None
+        context = context.transpose(1, 2).contiguous().view(bsz, D_MODEL)
+        context = self.static_attn_out(context)
+        return context, mean_weights
 
     def _gather_event_window(self, token_emb: torch.Tensor, batch, anchor_idx: int):
         offsets = batch["event_window_offsets"][:, anchor_idx]
@@ -139,32 +165,30 @@ class PlanBModel(nn.Module):
         if max_count == 0:
             return None, None
 
+        flat_positions = batch["event_window_positions"]
+        if flat_positions.numel() == 0:
+            return None, None
+
         B, _L, D = token_emb.shape
         device = token_emb.device
-        positions = torch.zeros(B, max_count, dtype=torch.long, device=device)
-        mask = torch.zeros(B, max_count, dtype=torch.bool, device=device)
-        flat_positions = batch["event_window_positions"]
-        for b in range(B):
-            count = int(counts[b].item())
-            if count == 0:
-                continue
-            start = int(offsets[b].item())
-            positions[b, :count] = flat_positions[start:start + count]
-            mask[b, :count] = True
-
+        step_offsets = torch.arange(max_count, device=device).unsqueeze(0)
+        mask = step_offsets < counts.unsqueeze(1)
+        flat_idx = offsets.unsqueeze(1) + step_offsets
+        safe_flat_idx = torch.where(mask, flat_idx, torch.zeros_like(flat_idx))
+        positions = flat_positions.index_select(0, safe_flat_idx.reshape(-1)).view(B, max_count)
         gather_idx = positions.unsqueeze(-1).expand(-1, -1, D)
         events = torch.gather(token_emb, 1, gather_idx)
         return events, mask
 
-    def _advance_event_window(self, h, z, event_window_emb, event_mask, static_tokens):
+    def _advance_event_window(self, h, z, event_window_emb, event_mask, static_key, static_value):
         if event_window_emb is None or event_mask is None:
             return h
         for step_idx in range(event_window_emb.size(1)):
             valid = event_mask[:, step_idx].unsqueeze(-1)
-            if not valid.any():
-                continue
             action_input = event_window_emb[:, step_idx]
-            static_ctx, _static_attn = self._static_context(h, z, action_input, static_tokens)
+            static_ctx, _static_attn = self._static_context(
+                h, z, action_input, static_key, static_value, need_weights=False
+            )
             conditioned_action = action_input + self.static_to_action(static_ctx)
             h_candidate = self.rssm.step(h, z, conditioned_action)
             h = torch.where(valid, h_candidate, h)
@@ -196,6 +220,7 @@ class PlanBModel(nn.Module):
             static_tokens = static_tokens.unsqueeze(0)
         if token_embeddings.dim() == 3:
             token_embeddings = token_embeddings[0]
+        static_key, static_value = self._prepare_static_attention(static_tokens)
 
         zero_action = self._zero_action(h.size(0), h.device)
         outputs = []
@@ -210,9 +235,11 @@ class PlanBModel(nn.Module):
                 positions = event_window_positions[start:start + count].long()
                 window_events = token_embeddings.index_select(0, positions).unsqueeze(0)
                 window_mask = torch.ones(1, count, dtype=torch.bool, device=h.device)
-                h = self._advance_event_window(h, z, window_events, window_mask, static_tokens)
+                h = self._advance_event_window(h, z, window_events, window_mask, static_key, static_value)
 
-            static_ctx, static_attn = self._static_context(h, z, zero_action, static_tokens)
+            static_ctx, static_attn = self._static_context(
+                h, z, zero_action, static_key, static_value, need_weights=True
+            )
             prior_mu, prior_logvar = self.rssm.prior(h)
             z = reparameterize(prior_mu, prior_logvar)
             anchor_repr = self.anchor_representation(h, z)
@@ -236,6 +263,7 @@ class PlanBModel(nn.Module):
         static_tokens = self.encode_static_tokens(batch["static"])
         if static_tokens.size(1) != STATIC_TOKEN_COUNT:
             raise RuntimeError(f"expected {STATIC_TOKEN_COUNT} static tokens, got {static_tokens.size(1)}")
+        static_key, static_value = self._prepare_static_attention(static_tokens)
         player_emb = self.player_enc(batch["players"], batch["player_ids"])
         token_emb = self.embed_token_sequence(batch, player_emb=player_emb)
 
@@ -253,7 +281,9 @@ class PlanBModel(nn.Module):
 
         for t in range(T):
             valid_anchor = anchor_mask[:, t].unsqueeze(-1)
-            static_ctx, static_attn = self._static_context(h, z, zero_action, static_tokens)
+            static_ctx, static_attn = self._static_context(
+                h, z, zero_action, static_key, static_value, need_weights=True
+            )
             conditioned_obs = obs[:, t] + self.static_to_obs(static_ctx)
             pr_mu, pr_lv = self.rssm.prior(h)
             po_mu, po_lv = self.rssm.posterior(h, conditioned_obs)
@@ -276,7 +306,7 @@ class PlanBModel(nn.Module):
 
             if t < T - 1:
                 event_window_emb, event_mask = self._gather_event_window(token_emb, batch, t)
-                h = self._advance_event_window(h, z, event_window_emb, event_mask, static_tokens)
+                h = self._advance_event_window(h, z, event_window_emb, event_mask, static_key, static_value)
 
         Z = torch.stack(z_all, dim=1)
         H = torch.stack(h_all, dim=1)

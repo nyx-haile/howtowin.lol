@@ -13,7 +13,7 @@ from typing import Final
 
 import numpy as np
 
-from raw_db import get_raw_match
+from raw_db import get_raw_match_only
 from model.patch_params import PATCH_VECTOR_DIM, patch_vector_for_match
 
 N_PARTICIPANTS: Final[int] = 10
@@ -57,7 +57,7 @@ def region_id_from_platform(platform_id: str | None) -> int:
     return PLATFORM_TO_REGION_ID.get(str(platform_id).upper(), 0)
 
 
-def build_static_feature_vector(match_id: str) -> np.ndarray:
+def build_static_feature_vector(match_id: str, *, match: dict | None = None) -> np.ndarray:
     """Return the canonical static feature vector for one match.
 
     Layout:
@@ -65,7 +65,8 @@ def build_static_feature_vector(match_id: str) -> np.ndarray:
     """
     vec = np.zeros(STATIC_VECTOR_DIM, dtype=np.float32)
 
-    match, _timeline = get_raw_match(match_id)
+    if match is None:
+        match = get_raw_match_only(match_id)
     if match is not None:
         participants = match.get("info", {}).get("participants", [])[:N_PARTICIPANTS]
         for i, participant in enumerate(participants):
