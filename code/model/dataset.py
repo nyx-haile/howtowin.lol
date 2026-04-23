@@ -21,6 +21,7 @@ from model.player_match_stats import PLAYER_MATCH_STATS_TABLE, ensure_player_mat
 from model.cold_holdout import load_player_cold_holdout
 from model.patch_params import PATCH_VECTOR_DIM
 from model.player_features import PLAYER_FEATURE_DIM, player_feature_vector
+from model.sample_materialization import PlanBSampleCache
 from model.static_features import STATIC_VECTOR_DIM, build_static_feature_vector
 from model.tokenizer import tokenize_match
 from model.tokens import (
@@ -96,6 +97,14 @@ OBJECTIVE_EVENT_TYPES_SQL = (
 )
 
 SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits')
+INCLUDE_LEGACY_LABELS_ENV = "HOWL_PLANB_INCLUDE_LEGACY_LABELS"
+
+
+def _env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_split(name):
@@ -183,13 +192,40 @@ def _update_objective_counters(counters, event):
 
 
 class MatchDataset(Dataset):
-    def __init__(self, match_ids, puuid_index=None, exclude_match_ids=None, cache_size=8000):
+    def __init__(
+        self,
+        match_ids,
+        puuid_index=None,
+        exclude_match_ids=None,
+        cache_size=8000,
+        materialized_cache_dir=None,
+        materialized_cache_version=None,
+        materialized_cache_mode=None,
+        materialized_cache_warmup=None,
+        include_legacy_labels=None,
+    ):
         self.match_ids = list(match_ids)
         self.puuid_index = puuid_index or {}
         self.exclude_match_ids = set(exclude_match_ids) if exclude_match_ids else set()
+        self.include_legacy_labels = (
+            _env_flag(INCLUDE_LEGACY_LABELS_ENV, default=True)
+            if include_legacy_labels is None
+            else bool(include_legacy_labels)
+        )
         self._cache = OrderedDict()
         self._cache_max = min(len(self.match_ids), cache_size)
         self._player_feat = self._preload_player_features()
+        self.materialized_sample_cache = PlanBSampleCache(
+            puuid_index=self.puuid_index,
+            exclude_match_ids=self.exclude_match_ids,
+            cache_dir=materialized_cache_dir,
+            version=materialized_cache_version,
+            mode=materialized_cache_mode,
+            warmup=materialized_cache_warmup,
+            sample_variant=("full" if self.include_legacy_labels else "core"),
+        )
+        if self.materialized_sample_cache.warmup:
+            self.materialize_samples()
 
     def _preload_player_features(self):
         if not self.match_ids:
@@ -229,8 +265,21 @@ class MatchDataset(Dataset):
 
     def _load(self, i):
         mid = self.match_ids[i]
+        if self.materialized_sample_cache.enabled:
+            return self.materialized_sample_cache.get_or_build(mid, self._build_sample)
+        return self._build_sample(mid)
+
+    def materialize_samples(self, match_ids=None):
+        if not self.materialized_sample_cache.enabled:
+            return
+        materialize = self.match_ids if match_ids is None else list(match_ids)
+        self.materialized_sample_cache.materialize_many(materialize, self._build_sample)
+
+    def _build_sample(self, mid):
         tokens = tokenize_match(mid)
-        labels, label_mask = _build_labels(tokens)
+        labels = label_mask = None
+        if self.include_legacy_labels:
+            labels, label_mask = _build_labels(tokens)
 
         token_ids = torch.tensor([t.type_id for t in tokens], dtype=torch.long)
         token_actors = torch.tensor([t.actor_slot for t in tokens], dtype=torch.long)
@@ -427,7 +476,7 @@ class MatchDataset(Dataset):
                 if tok.type_id in DECISION_MAP and 1 <= tok.actor_slot <= 10:
                     decision_labels[ti, tok.actor_slot - 1] = DECISION_MAP[tok.type_id]
 
-        return {
+        sample = {
             "static": static,
             "players": players,
             "player_ids": player_ids,
@@ -443,8 +492,6 @@ class MatchDataset(Dataset):
             "token_lane_types": token_lane_types,
             "token_tower_types": token_tower_types,
             "token_ward_types": token_ward_types,
-            "labels": labels,
-            "label_mask": label_mask,
             "anchor_positions": np.array(anchor_idx, dtype=np.int64),
             "frame_features": frame_feats,
             "anchor_macro_features": macro_feats,
@@ -463,6 +510,10 @@ class MatchDataset(Dataset):
             "window_positions": window_positions,
             "outcome": outcome,
         }
+        if self.include_legacy_labels:
+            sample["labels"] = labels
+            sample["label_mask"] = label_mask
+        return sample
 
 
 def collate_games(samples):
@@ -498,8 +549,10 @@ def collate_games(samples):
         lane_types[b, :L] = s["token_lane_types"]
         tower_types[b, :L] = s["token_tower_types"]
         ward_types[b, :L] = s["token_ward_types"]
-        labels[b, :L] = s["labels"]
-        mask[b, :L] = s["label_mask"]
+        if "labels" in s:
+            labels[b, :L] = s["labels"]
+        if "label_mask" in s:
+            mask[b, :L] = s["label_mask"]
         key_pad[b, :L] = False
 
     max_T = max(s["anchor_positions"].shape[0] for s in samples)
