@@ -1,3 +1,0 @@
-[submodule "league-of-legends-data-collector"]
-	path = league-of-legends-data-collector
-	url = https://github.com/Blizzeq/league-of-legends-data-collector/blob/master/riot_api_client.py

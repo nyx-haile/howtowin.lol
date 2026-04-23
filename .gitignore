@@ -20,6 +20,19 @@ __pycache__/
 data/dragon_cache/
 data/model_checkpoints/
 data/retrieval/
+data/materialized_samples/
+data/staging/
+data/worker_logs/
+data/logs/
+code/logs/
+splits/
+raw_matches.db*
+
+# Logs
+logs/
+
+# WSL NTFS alternate data streams
+*:Zone.Identifier
 
 # Editor / tool session state
 .claude/
