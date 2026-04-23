@@ -1,5 +1,6 @@
 import torch
 import pytest
+import torch.nn as nn
 from model.rssm import RSSMCore, free_bits_kl
 
 
@@ -55,3 +56,19 @@ def test_reparameterize_samples_with_gradient():
     z.sum().backward()
     assert mu.grad is not None
     assert logvar.grad is not None
+
+
+def test_scan_preserves_hidden_dtype_when_gru_returns_lower_precision(rssm):
+    class FakeGRU(nn.Module):
+        def forward(self, packed, h0):
+            return None, h0.to(torch.float16)
+
+    rssm.gru = FakeGRU()
+    h = torch.randn(2, 512, dtype=torch.float32)
+    z = torch.randn(2, 32, dtype=torch.float32)
+    action_sequence = torch.randn(2, 3, 256, dtype=torch.float32)
+    lengths = torch.tensor([3, 1], dtype=torch.long)
+
+    h_next = rssm.scan(h, z, action_sequence, lengths=lengths)
+
+    assert h_next.dtype == torch.float32

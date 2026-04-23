@@ -122,7 +122,7 @@ class RSSMCore(nn.Module):
         _, h_sorted = self.gru(packed, h0)
 
         _, unsort_order = torch.sort(sort_order)
-        h_active = h_sorted.squeeze(0).index_select(0, unsort_order)
+        h_active = h_sorted.squeeze(0).index_select(0, unsort_order).to(h.dtype)
 
         updated_h = h.clone()
         updated_h[active_idx] = h_active
