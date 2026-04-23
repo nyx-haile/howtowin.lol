@@ -4,11 +4,14 @@ import numpy as np
 import pytest
 import torch
 
+import model.plan_b_train as plan_b_train_module
 from model.plan_b_train import (
     BucketedBatchSampler,
     SECONDARY_LOSS_SCHEDULE,
+    _build_train_loader_kwargs,
     _project_training_runtime,
     _scheduled_time_mask,
+    _timed_preflight_iteration,
     plan_b_train_loop,
     run_training_preflight,
 )
@@ -26,6 +29,93 @@ def test_bucketed_batch_sampler_reduces_within_batch_cost_span():
 
     assert batches
     assert max(spans) <= 15
+
+
+def test_bucketed_batch_sampler_enforces_multiaxis_budgets():
+    sort_keys = [
+        (48, 32, 8, 0),
+        (50, 30, 7, 1),
+        (54, 29, 6, 2),
+        (130, 90, 20, 3),
+    ]
+    sampler = BucketedBatchSampler(
+        sort_keys,
+        batch_size=4,
+        shuffle=False,
+        bucket_size_multiplier=4,
+        token_budget=120,
+        event_budget=70,
+        anchor_budget=18,
+    )
+
+    batches = list(sampler)
+
+    assert batches == [[0, 1], [2], [3]]
+    for batch in batches:
+        token_sum = sum(sort_keys[i][0] for i in batch)
+        event_sum = sum(sort_keys[i][1] for i in batch)
+        anchor_sum = sum(sort_keys[i][2] for i in batch)
+        if len(batch) > 1:
+            assert token_sum <= sampler.token_budget
+            assert event_sum <= sampler.event_budget
+            assert anchor_sum <= sampler.anchor_budget
+
+
+def test_build_train_loader_kwargs_uses_cuda_throughput_defaults(monkeypatch):
+    monkeypatch.setattr(plan_b_train_module.os, "cpu_count", lambda: 32)
+    monkeypatch.setattr(plan_b_train_module, "_supports_dataloader_arg", lambda name: name == "in_order")
+
+    kwargs = _build_train_loader_kwargs(
+        device=torch.device("cuda"),
+        num_workers=None,
+        prefetch_factor=None,
+        persistent_workers=None,
+        loader_order="auto",
+    )
+
+    assert kwargs["num_workers"] == 12
+    assert kwargs["prefetch_factor"] == 4
+    assert kwargs["persistent_workers"] is True
+    assert kwargs["pin_memory"] is True
+    assert kwargs["in_order"] is False
+    assert kwargs["multiprocessing_context"] in {"forkserver", "spawn"}
+
+
+def test_timed_preflight_iteration_includes_loader_wait(monkeypatch):
+    now = {"t": 0.0}
+
+    def fake_perf_counter():
+        return now["t"]
+
+    class FakeIterator:
+        def __init__(self):
+            self.done = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.done:
+                raise StopIteration
+            self.done = True
+            now["t"] += 0.25
+            return {"batch": 1}
+
+    def fake_train(*args, **kwargs):
+        now["t"] += 0.75
+
+    monkeypatch.setattr(plan_b_train_module.time, "perf_counter", fake_perf_counter)
+    monkeypatch.setattr(plan_b_train_module, "_run_preflight_loaded_batch", fake_train)
+
+    elapsed, batch = _timed_preflight_iteration(
+        model=object(),
+        iterator=FakeIterator(),
+        device=torch.device("cpu"),
+        use_amp=False,
+    )
+
+    assert batch == {"batch": 1}
+    assert elapsed == pytest.approx(1.0)
 
 
 def test_secondary_grounding_masks_rotate_by_step():

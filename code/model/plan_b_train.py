@@ -1,4 +1,6 @@
+import inspect
 import math
+import multiprocessing as mp
 import os
 import random
 import time
@@ -22,6 +24,13 @@ ROLLOUT_LOSS_WEIGHTS = [0.05, 0.03, 0.02]
 HEAD_WEIGHTS = {"outcome": 0.35, "next_event": 0.35, "next_decision": 0.15, "next_frame": 0.10}
 EARLY_STOP_PATIENCE = 5
 DEFAULT_BUCKET_SIZE_MULTIPLIER = 64
+DEFAULT_BATCH_BUDGET_QUANTILE = 0.60
+DEFAULT_BATCH_BUDGET_HEADROOM = 1.15
+DEFAULT_CUDA_NUM_WORKERS = 12
+DEFAULT_CUDA_PREFETCH_FACTOR = 4
+DEFAULT_CPU_NUM_WORKERS = 0
+DEFAULT_CPU_PREFETCH_FACTOR = 2
+DEFAULT_LOADER_ORDER = "auto"
 PREFLIGHT_SAMPLE_BATCHES = 4
 PREFLIGHT_TIMED_BATCHES = 2
 PREFLIGHT_MIN_TOKEN_EFFICIENCY = 0.80
@@ -87,8 +96,79 @@ class SecondaryLossSchedule:
 SECONDARY_LOSS_SCHEDULE = SecondaryLossSchedule()
 
 
+@dataclass(frozen=True)
+class BatchWorkItem:
+    token_cost: int
+    event_cost: int
+    anchor_cost: int
+    sort_key: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class LoaderRuntimeConfig:
+    num_workers: int
+    prefetch_factor: int | None
+    persistent_workers: bool
+    pin_memory: bool
+    multiprocessing_context: str | None
+    in_order: bool | None
+
+
+def _quantile_int(values, q: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(int(v) for v in values)
+    pos = int(round((len(ordered) - 1) * min(max(q, 0.0), 1.0)))
+    return ordered[pos]
+
+
+def _coerce_batch_work_item(value, idx: int) -> BatchWorkItem:
+    if isinstance(value, BatchWorkItem):
+        return value
+    if isinstance(value, (tuple, list)):
+        ints = [int(v) for v in value]
+        if len(ints) >= 3:
+            token_cost = max(ints[0], 1)
+            event_cost = max(ints[1], 0)
+            anchor_cost = max(ints[2], 1)
+            stable = ints[3] if len(ints) > 3 else idx
+            return BatchWorkItem(
+                token_cost=token_cost,
+                event_cost=event_cost,
+                anchor_cost=anchor_cost,
+                sort_key=(token_cost, event_cost, anchor_cost, stable),
+            )
+        if len(ints) == 2:
+            token_cost = max(ints[0], 1)
+            event_cost = max(ints[1], 0)
+            return BatchWorkItem(
+                token_cost=token_cost,
+                event_cost=event_cost,
+                anchor_cost=1,
+                sort_key=(token_cost, event_cost, 1, idx),
+            )
+        if len(ints) == 1:
+            value = ints[0]
+    scalar = max(int(value), 1)
+    return BatchWorkItem(
+        token_cost=scalar,
+        event_cost=scalar,
+        anchor_cost=1,
+        sort_key=(scalar, scalar, 1, idx),
+    )
+
+
+def _resolve_budget(values, batch_size: int, explicit_budget: int | None) -> int:
+    if explicit_budget is not None:
+        return max(int(explicit_budget), 1)
+    if not values:
+        return max(int(batch_size), 1)
+    per_item = max(1, _quantile_int(values, DEFAULT_BATCH_BUDGET_QUANTILE))
+    return max(int(batch_size), int(math.ceil(per_item * batch_size * DEFAULT_BATCH_BUDGET_HEADROOM)))
+
+
 class BucketedBatchSampler(Sampler[list[int]]):
-    """Shuffle globally, then batch nearby-cost samples together within buckets."""
+    """Shuffle globally, then pack nearby-cost samples into budgeted batches."""
 
     def __init__(
         self,
@@ -98,55 +178,105 @@ class BucketedBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         drop_last: bool = False,
         bucket_size_multiplier: int = DEFAULT_BUCKET_SIZE_MULTIPLIER,
+        token_budget: int | None = None,
+        event_budget: int | None = None,
+        anchor_budget: int | None = None,
         seed: int = 0,
     ):
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         self.sort_keys = list(sort_keys)
+        self.work_items = [
+            _coerce_batch_work_item(sort_key, idx)
+            for idx, sort_key in enumerate(self.sort_keys)
+        ]
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.bucket_size = max(batch_size, batch_size * max(1, bucket_size_multiplier))
+        self.token_budget = _resolve_budget(
+            [item.token_cost for item in self.work_items],
+            batch_size=batch_size,
+            explicit_budget=token_budget,
+        )
+        self.event_budget = _resolve_budget(
+            [item.event_cost for item in self.work_items],
+            batch_size=batch_size,
+            explicit_budget=event_budget,
+        )
+        self.anchor_budget = _resolve_budget(
+            [item.anchor_cost for item in self.work_items],
+            batch_size=batch_size,
+            explicit_budget=anchor_budget,
+        )
         self.seed = seed
         self._epoch = 0
 
     def __len__(self):
-        n = len(self.sort_keys)
-        if self.drop_last:
-            return n // self.batch_size
-        return math.ceil(n / self.batch_size)
+        return len(self._build_batches(self.seed + self._epoch))
 
     def __iter__(self):
-        if not self.sort_keys:
+        if not self.work_items:
             return
 
-        rng = random.Random(self.seed + self._epoch)
+        batches = self._build_batches(self.seed + self._epoch)
         self._epoch += 1
+        for batch in batches:
+            if batch:
+                yield batch
 
-        indices = list(range(len(self.sort_keys)))
+    def _fits_budget(self, batch, candidate: BatchWorkItem) -> bool:
+        if not batch:
+            return True
+        next_len = len(batch) + 1
+        if next_len > self.batch_size:
+            return False
+        token_sum = sum(item.token_cost for item in batch) + candidate.token_cost
+        event_sum = sum(item.event_cost for item in batch) + candidate.event_cost
+        anchor_sum = sum(item.anchor_cost for item in batch) + candidate.anchor_cost
+        return (
+            token_sum <= self.token_budget
+            and event_sum <= self.event_budget
+            and anchor_sum <= self.anchor_budget
+        )
+
+    def _build_batches(self, epoch_seed: int) -> list[list[int]]:
+        rng = random.Random(epoch_seed)
+        indices = list(range(len(self.work_items)))
         if self.shuffle:
             rng.shuffle(indices)
 
-        batches = []
+        batches: list[list[int]] = []
         for start in range(0, len(indices), self.bucket_size):
             bucket = indices[start:start + self.bucket_size]
-            bucket.sort(key=self.sort_keys.__getitem__)
-            local_batches = [
-                bucket[i:i + self.batch_size]
-                for i in range(0, len(bucket), self.batch_size)
-            ]
-            if self.drop_last and local_batches and len(local_batches[-1]) < self.batch_size:
-                local_batches.pop()
+            bucket.sort(key=lambda idx: self.work_items[idx].sort_key)
+
+            local_batches: list[list[int]] = []
+            current_batch_indices: list[int] = []
+            current_batch_items: list[BatchWorkItem] = []
+            for idx in bucket:
+                item = self.work_items[idx]
+                if current_batch_indices and not self._fits_budget(current_batch_items, item):
+                    local_batches.append(current_batch_indices)
+                    current_batch_indices = []
+                    current_batch_items = []
+                current_batch_indices.append(idx)
+                current_batch_items.append(item)
+            if current_batch_indices:
+                local_batches.append(current_batch_indices)
+
+            if self.drop_last:
+                local_batches = [
+                    batch for batch in local_batches
+                    if len(batch) == self.batch_size
+                ]
             if self.shuffle:
                 rng.shuffle(local_batches)
             batches.extend(local_batches)
 
         if self.shuffle:
             rng.shuffle(batches)
-
-        for batch in batches:
-            if batch:
-                yield batch
+        return batches
 
 
 def estimate_match_batch_sort_keys(match_ids):
@@ -196,6 +326,108 @@ def estimate_match_batch_sort_keys(match_ids):
         est_tokens = anchors + events
         sort_keys.append((est_tokens, events, anchors, idx))
     return sort_keys
+
+
+def _supports_dataloader_arg(name: str) -> bool:
+    return name in inspect.signature(DataLoader).parameters
+
+
+def _resolve_loader_runtime_config(
+    *,
+    device: torch.device,
+    num_workers: int | None,
+    prefetch_factor: int | None,
+    persistent_workers: bool | None,
+    loader_order: str = DEFAULT_LOADER_ORDER,
+) -> LoaderRuntimeConfig:
+    loader_order = loader_order.lower()
+    if loader_order not in {"auto", "ordered", "out-of-order"}:
+        raise ValueError(f"unsupported loader_order={loader_order!r}")
+
+    if num_workers is None:
+        default_workers = DEFAULT_CUDA_NUM_WORKERS if device.type == "cuda" else DEFAULT_CPU_NUM_WORKERS
+        cpu_cap = max(os.cpu_count() or default_workers, 1)
+        num_workers = min(default_workers, cpu_cap)
+    num_workers = max(int(num_workers), 0)
+
+    pin_memory = device.type == "cuda"
+    if num_workers == 0:
+        return LoaderRuntimeConfig(
+            num_workers=0,
+            prefetch_factor=None,
+            persistent_workers=False,
+            pin_memory=pin_memory,
+            multiprocessing_context=None,
+            in_order=None,
+        )
+
+    if prefetch_factor is None:
+        prefetch_factor = (
+            DEFAULT_CUDA_PREFETCH_FACTOR
+            if device.type == "cuda" else DEFAULT_CPU_PREFETCH_FACTOR
+        )
+    prefetch_factor = max(int(prefetch_factor), 1)
+
+    if persistent_workers is None:
+        persistent_workers = True
+
+    methods = set(mp.get_all_start_methods())
+    if "forkserver" in methods:
+        multiprocessing_context = "forkserver"
+    elif "spawn" in methods:
+        multiprocessing_context = "spawn"
+    else:
+        multiprocessing_context = None
+
+    in_order = None
+    if _supports_dataloader_arg("in_order"):
+        if loader_order == "ordered":
+            in_order = True
+        elif loader_order == "out-of-order":
+            in_order = False
+        else:
+            in_order = not (device.type == "cuda" and num_workers > 0)
+    elif loader_order == "out-of-order":
+        raise ValueError("this torch build does not support DataLoader(in_order=...)")
+
+    return LoaderRuntimeConfig(
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=bool(persistent_workers),
+        pin_memory=pin_memory,
+        multiprocessing_context=multiprocessing_context,
+        in_order=in_order,
+    )
+
+
+def _build_train_loader_kwargs(
+    *,
+    device: torch.device,
+    num_workers: int | None,
+    prefetch_factor: int | None,
+    persistent_workers: bool | None,
+    loader_order: str = DEFAULT_LOADER_ORDER,
+) -> dict:
+    config = _resolve_loader_runtime_config(
+        device=device,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        loader_order=loader_order,
+    )
+    loader_kwargs = dict(
+        collate_fn=collate_games,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+    )
+    if config.num_workers > 0:
+        loader_kwargs["persistent_workers"] = config.persistent_workers
+        loader_kwargs["prefetch_factor"] = config.prefetch_factor
+        if config.multiprocessing_context is not None:
+            loader_kwargs["multiprocessing_context"] = config.multiprocessing_context
+    if config.in_order is not None:
+        loader_kwargs["in_order"] = config.in_order
+    return loader_kwargs
 
 
 def _get_device():
@@ -503,7 +735,7 @@ def _batch_efficiency_metrics(batch):
     }
 
 
-def _timed_preflight_step(
+def _run_preflight_loaded_batch(
     model,
     batch,
     device,
@@ -512,26 +744,97 @@ def _timed_preflight_step(
     epoch: int = 0,
     step: int = 0,
     force_rollout: bool | None = None,
-) -> float:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
+):
     batch = _batch_to_device(batch, device)
     model.zero_grad(set_to_none=True)
-
-    start = time.perf_counter()
     with torch.amp.autocast("cuda", enabled=use_amp):
         out = model(batch)
         losses = _compute_losses(out, batch, epoch=epoch, step=step)
         aux = _rollout_aux_loss(model, out, batch, epoch=epoch, step=step, force=force_rollout)
         loss = _combined_loss(losses, aux)
     loss.backward()
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elapsed = time.perf_counter() - start
 
     model.zero_grad(set_to_none=True)
-    return elapsed
+
+
+def _timed_preflight_iteration(
+    model,
+    iterator,
+    device,
+    use_amp: bool,
+    *,
+    epoch: int = 0,
+    step: int = 0,
+    force_rollout: bool | None = None,
+):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    start = time.perf_counter()
+    batch = next(iterator)
+    _run_preflight_loaded_batch(
+        model,
+        batch,
+        device,
+        use_amp,
+        epoch=epoch,
+        step=step,
+        force_rollout=force_rollout,
+    )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    return time.perf_counter() - start, batch
+
+
+def _measure_preflight_pass(
+    model,
+    loader,
+    device,
+    use_amp: bool,
+    *,
+    timed_batches: int,
+    epoch: int = 0,
+    force_rollout: bool | None = None,
+):
+    available = len(loader)
+    if available <= 0:
+        raise RuntimeError("training preflight could not sample any train batches")
+
+    iterator = iter(loader)
+    if available == 1:
+        elapsed, _ = _timed_preflight_iteration(
+            model,
+            iterator,
+            device,
+            use_amp,
+            epoch=epoch,
+            step=0,
+            force_rollout=force_rollout,
+        )
+        return [elapsed]
+
+    _timed_preflight_iteration(
+        model,
+        iterator,
+        device,
+        use_amp,
+        epoch=epoch,
+        step=0,
+        force_rollout=force_rollout,
+    )
+    n_timed = max(1, min(timed_batches, available - 1))
+    timed = []
+    for step_idx in range(n_timed):
+        elapsed, _ = _timed_preflight_iteration(
+            model,
+            iterator,
+            device,
+            use_amp,
+            epoch=epoch,
+            step=step_idx + 1,
+            force_rollout=force_rollout,
+        )
+        timed.append(elapsed)
+    return timed
 
 
 def run_training_preflight(
@@ -554,78 +857,58 @@ def run_training_preflight(
 
     try:
         iterator = iter(loader)
-        sampled = []
         efficiencies = []
         n_to_sample = min(sample_batches, len(loader))
         for _ in range(n_to_sample):
             batch = next(iterator)
-            sampled.append(batch)
             efficiencies.append(_batch_efficiency_metrics(batch))
+
+        if not efficiencies:
+            raise RuntimeError("training preflight could not sample any train batches")
+
+        mean_token_eff = sum(m["token_eff"] for m in efficiencies) / len(efficiencies)
+        mean_anchor_eff = sum(m["anchor_eff"] for m in efficiencies) / len(efficiencies)
+        mean_recur_eff = sum(m["recur_eff"] for m in efficiencies) / len(efficiencies)
+
+        model.train()
+        base_timed = _measure_preflight_pass(
+            model,
+            loader,
+            device,
+            use_amp,
+            timed_batches=timed_batches,
+            epoch=0,
+            force_rollout=False,
+        )
+        base_step_seconds = (sum(base_timed) / len(base_timed)) * PREFLIGHT_STEP_TIME_FUDGE
+
+        rollout_step_seconds = None
+        rollout_fraction = SECONDARY_LOSS_SCHEDULE.rollout_step_fraction(epochs=epochs)
+        if rollout_fraction > 0.0:
+            rollout_epoch = SECONDARY_LOSS_SCHEDULE.rollout_warmup_epochs
+            rollout_timed = _measure_preflight_pass(
+                model,
+                loader,
+                device,
+                use_amp,
+                timed_batches=timed_batches,
+                epoch=rollout_epoch,
+                force_rollout=True,
+            )
+            rollout_step_seconds = (sum(rollout_timed) / len(rollout_timed)) * PREFLIGHT_STEP_TIME_FUDGE
+
+        est_step_seconds, projected_epoch_minutes, projected_earlystop_hours, rollout_fraction = _project_training_runtime(
+            base_step_seconds=base_step_seconds,
+            rollout_step_seconds=rollout_step_seconds,
+            steps_per_epoch=len(loader),
+            epochs=epochs,
+        )
     finally:
         if sampler_epoch is not None:
             sampler._epoch = sampler_epoch
 
-    if not sampled:
-        raise RuntimeError("training preflight could not sample any train batches")
-
-    mean_token_eff = sum(m["token_eff"] for m in efficiencies) / len(efficiencies)
-    mean_anchor_eff = sum(m["anchor_eff"] for m in efficiencies) / len(efficiencies)
-    mean_recur_eff = sum(m["recur_eff"] for m in efficiencies) / len(efficiencies)
-
-    model.train()
-    warm_batch = sampled[0]
-    _timed_preflight_step(model, warm_batch, device, use_amp, force_rollout=False)
-    n_timed = max(1, min(timed_batches, len(sampled)))
-    base_timed = [
-        _timed_preflight_step(
-            model,
-            sampled[i],
-            device,
-            use_amp,
-            epoch=0,
-            step=i,
-            force_rollout=False,
-        )
-        for i in range(n_timed)
-    ]
-    base_step_seconds = (sum(base_timed) / len(base_timed)) * PREFLIGHT_STEP_TIME_FUDGE
-
-    rollout_step_seconds = None
-    rollout_fraction = SECONDARY_LOSS_SCHEDULE.rollout_step_fraction(epochs=epochs)
-    if rollout_fraction > 0.0:
-        rollout_epoch = SECONDARY_LOSS_SCHEDULE.rollout_warmup_epochs
-        _timed_preflight_step(
-            model,
-            warm_batch,
-            device,
-            use_amp,
-            epoch=rollout_epoch,
-            step=0,
-            force_rollout=True,
-        )
-        rollout_timed = [
-            _timed_preflight_step(
-                model,
-                sampled[i],
-                device,
-                use_amp,
-                epoch=rollout_epoch,
-                step=i,
-                force_rollout=True,
-            )
-            for i in range(n_timed)
-        ]
-        rollout_step_seconds = (sum(rollout_timed) / len(rollout_timed)) * PREFLIGHT_STEP_TIME_FUDGE
-
-    est_step_seconds, projected_epoch_minutes, projected_earlystop_hours, rollout_fraction = _project_training_runtime(
-        base_step_seconds=base_step_seconds,
-        rollout_step_seconds=rollout_step_seconds,
-        steps_per_epoch=len(loader),
-        epochs=epochs,
-    )
-
     print(
-        "[preflight] "
+        "[preflight/e2e] "
         f"token_eff={mean_token_eff:.3f}  "
         f"anchor_eff={mean_anchor_eff:.3f}  "
         f"recur_eff={mean_recur_eff:.3f}  "
@@ -687,18 +970,37 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       max_puuids: int = 20000,
                       log_every: int = 10,
                       checkpoint_tag: str = "plan_b_full",
-                      num_workers: int = 4,
+                      num_workers: int | None = None,
+                      prefetch_factor: int | None = None,
+                      persistent_workers: bool | None = None,
+                      loader_order: str = DEFAULT_LOADER_ORDER,
+                      train_cache_size: int | None = None,
                       run_preflight: bool = True):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
 
     exclude = set(val_match_ids) | set(cold_match_ids)
-    train_ds = MatchDataset(train_match_ids, puuid_index, exclude_match_ids=exclude)
+    device = _get_device()
+    use_amp = device.type == "cuda"
+    loader_config = _resolve_loader_runtime_config(
+        device=device,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        loader_order=loader_order,
+    )
+    if train_cache_size is None:
+        train_cache_size = 0 if loader_config.num_workers > 0 else 8000
+
+    train_ds = MatchDataset(
+        train_match_ids,
+        puuid_index,
+        exclude_match_ids=exclude,
+        cache_size=max(int(train_cache_size), 0),
+    )
     val_ds = MatchDataset(val_match_ids, puuid_index, exclude_match_ids=exclude)
     cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) if cold_match_ids else None
 
-    device = _get_device()
-    use_amp = device.type == "cuda"
     if use_amp:
         torch.backends.cudnn.benchmark = True
     model = PlanBModel(max_puuids=max_puuids).to(device)
@@ -713,6 +1015,27 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         f"rollout_batch_stride={SECONDARY_LOSS_SCHEDULE.rollout_batch_stride}",
         flush=True,
     )
+    loader_kwargs = _build_train_loader_kwargs(
+        device=device,
+        num_workers=loader_config.num_workers,
+        prefetch_factor=loader_config.prefetch_factor,
+        persistent_workers=loader_config.persistent_workers,
+        loader_order=loader_order,
+    )
+    print(
+        "train loader  "
+        f"num_workers={loader_config.num_workers}  "
+        f"prefetch_factor={loader_config.prefetch_factor or 0}  "
+        f"persistent_workers={loader_config.persistent_workers}  "
+        f"pin_memory={loader_config.pin_memory}  "
+        + (
+            f"in_order={loader_config.in_order}  "
+            if loader_config.in_order is not None else
+            ""
+        )
+        + f"train_cache_size={max(int(train_cache_size), 0)}",
+        flush=True,
+    )
 
     history = {
         "train_loss": [],
@@ -724,14 +1047,6 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     patience_left = EARLY_STOP_PATIENCE
     best_path = os.path.join(CHECKPOINT_DIR, f"{checkpoint_tag}_best.pt")
 
-    loader_kwargs = dict(
-        collate_fn=collate_games,
-        num_workers=num_workers,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=(2 if num_workers > 0 else None),
-        pin_memory=use_amp,
-        multiprocessing_context=("forkserver" if num_workers > 0 else None),
-    )
     if batch_size > 1 and len(train_ds) > batch_size:
         batch_sampler = BucketedBatchSampler(
             estimate_match_batch_sort_keys(train_match_ids),
@@ -739,7 +1054,12 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
             shuffle=True,
         )
         print(
-            f"bucketed train batching enabled  batch_size={batch_size}  bucket_size={batch_sampler.bucket_size}",
+            "budgeted train batching enabled  "
+            f"max_batch_size={batch_size}  "
+            f"bucket_size={batch_sampler.bucket_size}  "
+            f"token_budget={batch_sampler.token_budget}  "
+            f"event_budget={batch_sampler.event_budget}  "
+            f"anchor_budget={batch_sampler.anchor_budget}",
             flush=True,
         )
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, **loader_kwargs)
@@ -827,6 +1147,15 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                     "rollout_steps": ROLLOUT_STEPS,
                     "rollout_loss_weights": list(ROLLOUT_LOSS_WEIGHTS),
                     "secondary_schedule": asdict(SECONDARY_LOSS_SCHEDULE),
+                },
+                "runtime_config": {
+                    "num_workers": loader_config.num_workers,
+                    "prefetch_factor": loader_config.prefetch_factor,
+                    "persistent_workers": loader_config.persistent_workers,
+                    "pin_memory": loader_config.pin_memory,
+                    "multiprocessing_context": loader_config.multiprocessing_context,
+                    "in_order": loader_config.in_order,
+                    "train_cache_size": max(int(train_cache_size), 0),
                 },
             }, best_path)
         else:

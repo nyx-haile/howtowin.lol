@@ -87,6 +87,11 @@ def cmd_plan_b_train(args):
                       epochs=args.epochs, batch_size=args.batch_size,
                       lr=args.lr, max_puuids=args.max_puuids,
                       log_every=args.log_every,
+                      num_workers=args.num_workers,
+                      prefetch_factor=args.prefetch_factor,
+                      persistent_workers=args.persistent_workers,
+                      loader_order=args.loader_order,
+                      train_cache_size=args.train_cache_size,
                       checkpoint_tag="plan_b_full")
 
 
@@ -364,7 +369,7 @@ def cmd_eval():
     print(f"\nM2 stretch target: overall >= 0.95")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("shakedown")
@@ -383,6 +388,21 @@ if __name__ == "__main__":
     p_pb_tr.add_argument("--lr", type=float, default=3e-4)
     p_pb_tr.add_argument("--max-puuids", type=int, default=20000, dest="max_puuids")
     p_pb_tr.add_argument("--log-every", type=int, default=10, dest="log_every")
+    p_pb_tr.add_argument("--num-workers", type=int, default=None, dest="num_workers")
+    p_pb_tr.add_argument("--prefetch-factor", type=int, default=None, dest="prefetch_factor")
+    p_pb_tr.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="persistent_workers",
+    )
+    p_pb_tr.add_argument(
+        "--loader-order",
+        choices=("auto", "ordered", "out-of-order"),
+        default="auto",
+        dest="loader_order",
+    )
+    p_pb_tr.add_argument("--train-cache-size", type=int, default=None, dest="train_cache_size")
     sub.add_parser("plan-b-eval")
 
     p_rb = sub.add_parser("retrieval-build")
@@ -399,8 +419,12 @@ if __name__ == "__main__":
     p_ls.add_argument("--k", type=int, default=64)
     p_ls.add_argument("--index-path", default=None, dest="index_path")
     p_ls.add_argument("--ckpt-path", default=None, dest="ckpt_path")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.cmd == "shakedown":
         ok = cmd_shakedown()
@@ -423,3 +447,7 @@ if __name__ == "__main__":
         cmd_retrieval_eval(args)
     elif args.cmd == "lesson":
         cmd_lesson(args)
+
+
+if __name__ == "__main__":
+    main()
