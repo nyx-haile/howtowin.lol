@@ -275,15 +275,15 @@ class PlanBModel(nn.Module):
             n_valid_anchors = int(anchor_mask.sum().item())
         max_steps = min(n_steps, max(n_valid_anchors - start_anchor - 1, 0))
 
-        gpu_device = h.device
+        dev = h.device
         for step_idx in range(max_steps):
             window_idx = start_anchor + step_idx
             count = int(event_window_counts[window_idx].item())
             if count > 0:
                 start = int(event_window_offsets[window_idx].item())
-                positions = event_window_positions[start:start + count].to(gpu_device)
+                positions = event_window_positions[start:start + count]
                 window_events = token_embeddings.index_select(0, positions).unsqueeze(0)
-                window_mask = torch.ones(1, count, dtype=torch.bool, device=gpu_device)
+                window_mask = torch.ones(1, count, dtype=torch.bool, device=dev)
                 h = self._advance_event_window(h, z, window_events, window_mask, static_key, static_value)
 
             static_ctx, _ = self._static_context(

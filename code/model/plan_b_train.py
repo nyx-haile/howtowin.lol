@@ -615,10 +615,12 @@ def _rollout_aux_loss(
 
     device = out["outcome_logits"].device
     anchor_mask = _anchor_mask(batch)
-    n_anchors_per = anchor_mask.sum(dim=1).cpu()  # one D2H for the whole batch
+    # Counts and offsets to CPU once — avoids per-step GPU syncs inside rollout.
+    # Positions stay on GPU (already moved by _batch_to_device) — direct index_select, no transfer.
+    n_anchors_per = anchor_mask.sum(dim=1).cpu()
     ew_counts_cpu = batch["event_window_counts"].cpu()
     ew_offsets_cpu = batch["event_window_offsets"].cpu()
-    ew_positions_cpu = batch["event_window_positions"].cpu()
+    ew_positions_gpu = batch["event_window_positions"]  # keep on GPU
     total = torch.tensor(0.0, device=device)
     weight_total = 0.0
 
@@ -633,7 +635,7 @@ def _rollout_aux_loss(
             z0=out["z"][b, seed_t],
             static_tokens=out["static_tokens"][b],
             token_embeddings=out["token_embeddings"][b],
-            event_window_positions=ew_positions_cpu,
+            event_window_positions=ew_positions_gpu,
             event_window_offsets=ew_offsets_cpu[b],
             event_window_counts=ew_counts_cpu[b],
             anchor_mask=anchor_mask[b],
@@ -1134,8 +1136,12 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         history["train_loss"].append(ep_core_loss)
         history["train_total_loss"].append(ep_total_loss)
 
-        game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15, num_workers=loader_config.num_workers)
-        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15, num_workers=loader_config.num_workers) if cold_ds else 0.5
+        # num_workers=0: val/cold sets are tiny (101 games); spawning 12 workers adds
+        # memory/scheduling pressure and fragments the CUDA allocator before epoch N+1.
+        game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15, num_workers=0)
+        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15, num_workers=0) if cold_ds else 0.5
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         history["game_cold_auc15"].append(game_auc)
         history["player_cold_auc15"].append(cold_auc)
 
