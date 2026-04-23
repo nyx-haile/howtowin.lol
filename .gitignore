@@ -37,3 +37,4 @@ logs/
 # Editor / tool session state
 .claude/
 .playwright-mcp/
+.thesis/worktrees/
