@@ -9,6 +9,7 @@ from db import get_conn, init_db, insert_player
 
 SEED_CACHE_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'seed_cache.json')
 SEED_CACHE_MAX_AGE_S = 7 * 24 * 3600  # refresh weekly
+RESEED_COOLDOWN_S = 24 * 3600  # per-puuid re-queue cooldown — skip if seen < 24h
 
 PLATFORM_REGIONS = [
     "br1",
@@ -115,14 +116,37 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True, refres
             print(f"Cached {len(all_entries)} players to {SEED_CACHE_PATH}")
 
     count = 0
+    reseeded = 0
+    skipped_cooldown = 0
+    now = time.time()
     for entry in all_entries:
         puuid = entry["puuid"]
         insert_player(conn, puuid, None, entry["tier"], entry["division"], entry["lp"])
-        if not seed.sismember("player_handled", puuid):
-            route = route_for_platform(entry["region"])
-            seed.zincrby(f"player_queue:{route}", _tier_priority(entry["tier"], entry["lp"]), puuid)
-            seed.hset("player_region", puuid, route)
+        # Always re-queue top players — handle_player is idempotent via
+        # sdiff on player_matches_{puuid}, and re-processing picks up newly
+        # played games. Without this, small-seed routes (asia: kr+jp1 × 100)
+        # go cold permanently after one full drain into player_handled.
+        # Cap to once per RESEED_COOLDOWN_S per puuid to avoid wasting API.
+        if seed.sismember("player_processing", puuid):
+            count += 1
+            continue
+        last_ts_raw = seed.hget("player_last_reseed", puuid)
+        if last_ts_raw is not None:
+            try:
+                last_ts = float(last_ts_raw)
+            except (TypeError, ValueError):
+                last_ts = 0.0
+            if now - last_ts < RESEED_COOLDOWN_S:
+                skipped_cooldown += 1
+                count += 1
+                continue
+        route = route_for_platform(entry["region"])
+        seed.zincrby(f"player_queue:{route}", _tier_priority(entry["tier"], entry["lp"]), puuid)
+        seed.hset("player_region", puuid, route)
+        seed.hset("player_last_reseed", puuid, now)
+        reseeded += 1
         count += 1
+    print(f"Re-seed stats: queued={reseeded}, skipped_cooldown={skipped_cooldown}, total={count}")
 
     conn.commit()
     conn.close()
