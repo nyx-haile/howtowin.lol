@@ -115,3 +115,29 @@ def test_gather_event_window_handles_variable_counts_without_python_loop():
     events1, mask1 = model._gather_event_window(token_emb, batch, 1)
     assert mask1.tolist() == [[True], [False]]
     assert torch.equal(events1[0, 0], token_emb[0, 4])
+
+
+def test_advance_event_window_matches_stepwise_reference():
+    torch.manual_seed(0)
+    model = PlanBModel(max_puuids=8)
+    B, L = 3, 5
+    h = torch.randn(B, D_H)
+    z = torch.randn(B, 32)
+    event_window_emb = torch.randn(B, L, D_MODEL)
+    event_mask = torch.tensor(
+        [[True, True, True, True, True], [True, True, False, False, False], [False, False, False, False, False]]
+    )
+    static_tokens = torch.randn(B, STATIC_TOKEN_COUNT, D_MODEL)
+    static_key, static_value = model._prepare_static_attention(static_tokens)
+
+    h_scan = model._advance_event_window(h, z, event_window_emb, event_mask, static_key, static_value)
+
+    static_ctx = model._static_event_context(z, event_window_emb, static_key, static_value)
+    conditioned_action = event_window_emb + model.static_to_action(static_ctx)
+    h_step = h.clone()
+    for step_idx in range(L):
+        valid = event_mask[:, step_idx].unsqueeze(-1)
+        h_candidate = model.rssm.step(h_step, z, conditioned_action[:, step_idx])
+        h_step = torch.where(valid, h_candidate, h_step)
+
+    assert torch.allclose(h_scan, h_step, atol=1e-5, rtol=1e-5)

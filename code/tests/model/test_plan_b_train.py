@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 import torch
 
-from model.plan_b_train import BucketedBatchSampler, plan_b_train_loop, run_training_preflight
+from model.plan_b_train import (
+    BucketedBatchSampler,
+    SECONDARY_LOSS_SCHEDULE,
+    _project_training_runtime,
+    _scheduled_time_mask,
+    plan_b_train_loop,
+    run_training_preflight,
+)
 
 
 def test_bucketed_batch_sampler_reduces_within_batch_cost_span():
@@ -19,6 +26,53 @@ def test_bucketed_batch_sampler_reduces_within_batch_cost_span():
 
     assert batches
     assert max(spans) <= 15
+
+
+def test_secondary_grounding_masks_rotate_by_step():
+    mask = torch.ones(1, 4, dtype=torch.bool)
+
+    even = _scheduled_time_mask(
+        mask,
+        stride=SECONDARY_LOSS_SCHEDULE.decision_stride,
+        offset=SECONDARY_LOSS_SCHEDULE.stride_offset(
+            epoch=0,
+            step=0,
+            stride=SECONDARY_LOSS_SCHEDULE.decision_stride,
+        ),
+    )
+    odd = _scheduled_time_mask(
+        mask,
+        stride=SECONDARY_LOSS_SCHEDULE.decision_stride,
+        offset=SECONDARY_LOSS_SCHEDULE.stride_offset(
+            epoch=0,
+            step=1,
+            stride=SECONDARY_LOSS_SCHEDULE.decision_stride,
+        ),
+    )
+
+    assert even.tolist() == [[True, False, True, False]]
+    assert odd.tolist() == [[False, True, False, True]]
+
+
+def test_rollout_schedule_uses_warmup_and_batch_cadence():
+    assert not SECONDARY_LOSS_SCHEDULE.rollout_active(epoch=0, step=0)
+    assert SECONDARY_LOSS_SCHEDULE.rollout_active(epoch=1, step=0)
+    assert not SECONDARY_LOSS_SCHEDULE.rollout_active(epoch=1, step=1)
+    assert SECONDARY_LOSS_SCHEDULE.rollout_step_fraction(epochs=7) == pytest.approx(6 / 7 / 4)
+
+
+def test_project_training_runtime_accounts_for_sparse_rollout_fraction():
+    avg_step, epoch_minutes, earlystop_hours, rollout_fraction = _project_training_runtime(
+        base_step_seconds=1.0,
+        rollout_step_seconds=1.4,
+        steps_per_epoch=60,
+        epochs=7,
+    )
+
+    assert rollout_fraction == pytest.approx(6 / 7 / 4)
+    assert avg_step == pytest.approx(1.0 + 0.4 * rollout_fraction)
+    assert epoch_minutes == pytest.approx(avg_step)
+    assert earlystop_hours == pytest.approx(avg_step * 7 / 60.0)
 
 
 def test_overfit_tiny_corpus_drives_loss_down():

@@ -57,7 +57,8 @@ class PlanBModel(nn.Module):
         if self.static_head_dim * self.static_num_heads != D_MODEL:
             raise ValueError("D_MODEL must be divisible by static_num_heads")
         self.static_attn_scale = self.static_head_dim ** -0.5
-        self.static_step_query = nn.Linear(D_H + D_Z + D_ACTION, D_MODEL)
+        self.static_anchor_query = nn.Linear(D_H + D_Z, D_MODEL)
+        self.static_event_query = nn.Linear(D_ACTION + D_Z, D_MODEL)
         self.static_key = nn.Linear(D_MODEL, D_MODEL)
         self.static_value = nn.Linear(D_MODEL, D_MODEL)
         self.static_attn_out = nn.Linear(D_MODEL, D_MODEL)
@@ -141,22 +142,63 @@ class PlanBModel(nn.Module):
         ).transpose(1, 2)
         return key, value
 
-    def _static_context(self, h, z, action_input, static_key, static_value, need_weights: bool = False):
-        bsz = h.size(0)
-        query = self.static_step_query(torch.cat([h, z, action_input], dim=-1)).view(
-            bsz, self.static_num_heads, 1, self.static_head_dim
-        )
+    def _static_context_from_query(
+        self,
+        query: torch.Tensor,
+        static_key: torch.Tensor,
+        static_value: torch.Tensor,
+        *,
+        need_weights: bool = False,
+    ):
+        squeeze_steps = query.dim() == 2
+        if squeeze_steps:
+            query = query.unsqueeze(1)
+
+        bsz, n_steps, _ = query.shape
+        query = query.view(
+            bsz, n_steps, self.static_num_heads, self.static_head_dim
+        ).transpose(1, 2)
+
         if need_weights:
             attn_scores = torch.matmul(query, static_key.transpose(-2, -1)) * self.static_attn_scale
             attn_weights = attn_scores.softmax(dim=-1)
             context = torch.matmul(attn_weights, static_value)
-            mean_weights = attn_weights.mean(dim=1).squeeze(1)
+            mean_weights = attn_weights.mean(dim=1)
         else:
             context = F.scaled_dot_product_attention(query, static_key, static_value, dropout_p=0.0)
             mean_weights = None
-        context = context.transpose(1, 2).contiguous().view(bsz, D_MODEL)
+
+        context = context.transpose(1, 2).contiguous().view(bsz, n_steps, D_MODEL)
         context = self.static_attn_out(context)
+
+        if squeeze_steps:
+            context = context.squeeze(1)
+            if mean_weights is not None:
+                mean_weights = mean_weights.squeeze(1)
         return context, mean_weights
+
+    def _static_context(self, h, z, action_input, static_key, static_value, need_weights: bool = False):
+        del action_input
+        query = self.static_anchor_query(torch.cat([h, z], dim=-1))
+        return self._static_context_from_query(
+            query,
+            static_key,
+            static_value,
+            need_weights=need_weights,
+        )
+
+    def _static_event_context(self, z, event_window_emb, static_key, static_value):
+        if event_window_emb is None:
+            return None
+        z_query = z.unsqueeze(1).expand(-1, event_window_emb.size(1), -1)
+        query = self.static_event_query(torch.cat([event_window_emb, z_query], dim=-1))
+        context, _ = self._static_context_from_query(
+            query,
+            static_key,
+            static_value,
+            need_weights=False,
+        )
+        return context
 
     def _gather_event_window(self, token_emb: torch.Tensor, batch, anchor_idx: int):
         offsets = batch["event_window_offsets"][:, anchor_idx]
@@ -183,16 +225,18 @@ class PlanBModel(nn.Module):
     def _advance_event_window(self, h, z, event_window_emb, event_mask, static_key, static_value):
         if event_window_emb is None or event_mask is None:
             return h
-        for step_idx in range(event_window_emb.size(1)):
-            valid = event_mask[:, step_idx].unsqueeze(-1)
-            action_input = event_window_emb[:, step_idx]
-            static_ctx, _static_attn = self._static_context(
-                h, z, action_input, static_key, static_value, need_weights=False
-            )
-            conditioned_action = action_input + self.static_to_action(static_ctx)
-            h_candidate = self.rssm.step(h, z, conditioned_action)
-            h = torch.where(valid, h_candidate, h)
-        return h
+        lengths = event_mask.to(dtype=torch.long).sum(dim=1)
+        if lengths.max().item() == 0:
+            return h
+
+        static_ctx = self._static_event_context(z, event_window_emb, static_key, static_value)
+        conditioned_action = event_window_emb + self.static_to_action(static_ctx)
+        return self.rssm.scan(
+            h,
+            z,
+            conditioned_action,
+            lengths=lengths,
+        )
 
     def rollout_prior_single(
         self,

@@ -2,6 +2,7 @@ import math
 import os
 import random
 import time
+from dataclasses import asdict, dataclass
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +37,54 @@ MONSTER_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["ELITE_MONSTER_K
 BUILDING_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["BUILDING_KILL"])
 WARD_PLACED_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["WARD_PLACED"])
 WARD_KILL_EVENT_LABEL = event_label_from_type_id(EVENT_TYPE_TO_ID["WARD_KILL"])
+
+
+@dataclass(frozen=True)
+class SecondaryLossSchedule:
+    """Sparse training schedule for non-primary Plan B objectives.
+
+    Canonical spec priority order:
+    - primary: next-event + outcome
+    - secondary grounding: next-decision + next-observation
+    - rollout: important contract question, but not required every anchor/every batch
+
+    Keep the primary contract dense while making the secondary objectives cheaper.
+    """
+
+    decision_stride: int = 2
+    frame_stride: int = 2
+    rollout_warmup_epochs: int = 1
+    rollout_batch_stride: int = 4
+    rollout_batch_phase: int = 0
+
+    def stride_offset(self, *, epoch: int, step: int, stride: int) -> int:
+        if stride <= 1:
+            return 0
+        return (epoch + step) % stride
+
+    def rollout_active(self, *, epoch: int, step: int, force: bool | None = None) -> bool:
+        if force is False:
+            return False
+        if ROLLOUT_STEPS <= 0:
+            return False
+        if force is True:
+            return True
+        if epoch < self.rollout_warmup_epochs:
+            return False
+        stride = max(1, self.rollout_batch_stride)
+        return ((step - self.rollout_batch_phase) % stride) == 0
+
+    def rollout_step_fraction(self, *, epochs: int) -> float:
+        if ROLLOUT_STEPS <= 0:
+            return 0.0
+        horizon = min(max(epochs, 0), EARLY_STOP_PATIENCE + 2)
+        if horizon <= 0:
+            return 0.0
+        active_epochs = max(horizon - self.rollout_warmup_epochs, 0)
+        return (active_epochs / horizon) / max(1, self.rollout_batch_stride)
+
+
+SECONDARY_LOSS_SCHEDULE = SecondaryLossSchedule()
 
 
 class BucketedBatchSampler(Sampler[list[int]]):
@@ -199,6 +248,42 @@ def _masked_ce(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) 
     return F.cross_entropy(logits[mask], targets[mask], reduction="mean")
 
 
+def _scheduled_time_mask(mask: torch.Tensor, *, stride: int, offset: int) -> torch.Tensor:
+    if stride <= 1 or mask.size(1) == 0:
+        return mask
+    positions = torch.arange(mask.size(1), device=mask.device)
+    keep = (positions % stride) == offset
+    return mask & keep.unsqueeze(0)
+
+
+def _secondary_anchor_mask(
+    anchor_mask: torch.Tensor,
+    *,
+    epoch: int,
+    step: int,
+    schedule: SecondaryLossSchedule = SECONDARY_LOSS_SCHEDULE,
+) -> torch.Tensor:
+    return _scheduled_time_mask(
+        anchor_mask,
+        stride=schedule.decision_stride,
+        offset=schedule.stride_offset(epoch=epoch, step=step, stride=schedule.decision_stride),
+    )
+
+
+def _secondary_transition_mask(
+    transition_mask: torch.Tensor,
+    *,
+    epoch: int,
+    step: int,
+    schedule: SecondaryLossSchedule = SECONDARY_LOSS_SCHEDULE,
+) -> torch.Tensor:
+    return _scheduled_time_mask(
+        transition_mask,
+        stride=schedule.frame_stride,
+        offset=schedule.stride_offset(epoch=epoch, step=step, stride=schedule.frame_stride),
+    )
+
+
 def _event_loss_components(out, batch):
     event = out["event_factors"]
     anchor_mask = _anchor_mask(batch)
@@ -232,7 +317,14 @@ def _event_loss_components(out, batch):
     return torch.stack(losses).mean()
 
 
-def _compute_losses(out, batch):
+def _compute_losses(
+    out,
+    batch,
+    *,
+    epoch: int = 0,
+    step: int = 0,
+    schedule: SecondaryLossSchedule = SECONDARY_LOSS_SCHEDULE,
+):
     losses = {}
     anchor_mask = _anchor_mask(batch)
     transition_mask = _transition_mask(batch)
@@ -249,7 +341,8 @@ def _compute_losses(out, batch):
     dec_logits = out["decision_logits"]
     dec_logits_full = F.pad(dec_logits, (0, 1))
     dec_targets = batch["decision_labels"].long()
-    dec_mask = anchor_mask.unsqueeze(-1).expand_as(dec_targets)
+    decision_anchor_mask = _secondary_anchor_mask(anchor_mask, epoch=epoch, step=step, schedule=schedule)
+    dec_mask = decision_anchor_mask.unsqueeze(-1).expand_as(dec_targets)
     if dec_mask.any():
         losses["next_decision"] = F.cross_entropy(dec_logits_full[dec_mask], dec_targets[dec_mask], reduction="mean")
     else:
@@ -259,7 +352,10 @@ def _compute_losses(out, batch):
     logvar = out["frame_logvar"][:, :-1]
     target = _frame_delta_labels(batch)
     gauss_nll = 0.5 * (logvar + (target - mu).pow(2) / logvar.exp())
-    losses["next_frame"] = _masked_mean(gauss_nll, transition_mask)
+    scheduled_transition_mask = _secondary_transition_mask(
+        transition_mask, epoch=epoch, step=step, schedule=schedule
+    )
+    losses["next_frame"] = _masked_mean(gauss_nll, scheduled_transition_mask)
 
     kl = free_bits_kl(
         out["post_mu"].reshape(-1, D_Z), out["post_logvar"].reshape(-1, D_Z),
@@ -270,11 +366,22 @@ def _compute_losses(out, batch):
     return losses
 
 
-def _rollout_aux_loss(model, out, batch):
+def _rollout_aux_loss(
+    model,
+    out,
+    batch,
+    *,
+    epoch: int = 0,
+    step: int = 0,
+    schedule: SecondaryLossSchedule = SECONDARY_LOSS_SCHEDULE,
+    force: bool | None = None,
+):
     if ROLLOUT_STEPS == 0:
-        return torch.tensor(0.0, device=out["event_logits"].device)
+        return torch.tensor(0.0, device=out["outcome_logits"].device)
+    if not schedule.rollout_active(epoch=epoch, step=step, force=force):
+        return torch.tensor(0.0, device=out["outcome_logits"].device)
 
-    device = out["event_logits"].device
+    device = out["outcome_logits"].device
     anchor_mask = _anchor_mask(batch)
     total = torch.tensor(0.0, device=device)
     weight_total = 0.0
@@ -329,6 +436,26 @@ def _combined_loss(losses, rollout_aux):
     return total
 
 
+def _project_training_runtime(
+    *,
+    base_step_seconds: float,
+    rollout_step_seconds: float | None,
+    steps_per_epoch: int,
+    epochs: int,
+    schedule: SecondaryLossSchedule = SECONDARY_LOSS_SCHEDULE,
+):
+    rollout_fraction = schedule.rollout_step_fraction(epochs=epochs)
+    rollout_extra = 0.0
+    if rollout_step_seconds is not None:
+        rollout_extra = max(rollout_step_seconds - base_step_seconds, 0.0)
+    avg_step_seconds = base_step_seconds + rollout_fraction * rollout_extra
+    projected_epoch_minutes = avg_step_seconds * steps_per_epoch / 60.0
+    projected_earlystop_hours = (
+        projected_epoch_minutes * min(max(epochs, 0), EARLY_STOP_PATIENCE + 2) / 60.0
+    )
+    return avg_step_seconds, projected_epoch_minutes, projected_earlystop_hours, rollout_fraction
+
+
 @torch.no_grad()
 def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
     from sklearn.metrics import roc_auc_score
@@ -376,7 +503,16 @@ def _batch_efficiency_metrics(batch):
     }
 
 
-def _timed_preflight_step(model, batch, device, use_amp: bool) -> float:
+def _timed_preflight_step(
+    model,
+    batch,
+    device,
+    use_amp: bool,
+    *,
+    epoch: int = 0,
+    step: int = 0,
+    force_rollout: bool | None = None,
+) -> float:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
@@ -386,8 +522,8 @@ def _timed_preflight_step(model, batch, device, use_amp: bool) -> float:
     start = time.perf_counter()
     with torch.amp.autocast("cuda", enabled=use_amp):
         out = model(batch)
-        losses = _compute_losses(out, batch)
-        aux = _rollout_aux_loss(model, out, batch)
+        losses = _compute_losses(out, batch, epoch=epoch, step=step)
+        aux = _rollout_aux_loss(model, out, batch, epoch=epoch, step=step, force=force_rollout)
         loss = _combined_loss(losses, aux)
     loss.backward()
     if device.type == "cuda":
@@ -438,21 +574,68 @@ def run_training_preflight(
 
     model.train()
     warm_batch = sampled[0]
-    _timed_preflight_step(model, warm_batch, device, use_amp)
-    n_timed = min(timed_batches, len(sampled))
-    timed = [
-        _timed_preflight_step(model, sampled[i], device, use_amp)
+    _timed_preflight_step(model, warm_batch, device, use_amp, force_rollout=False)
+    n_timed = max(1, min(timed_batches, len(sampled)))
+    base_timed = [
+        _timed_preflight_step(
+            model,
+            sampled[i],
+            device,
+            use_amp,
+            epoch=0,
+            step=i,
+            force_rollout=False,
+        )
         for i in range(n_timed)
     ]
-    est_step_seconds = (sum(timed) / max(len(timed), 1)) * PREFLIGHT_STEP_TIME_FUDGE
-    projected_epoch_minutes = est_step_seconds * len(loader) / 60.0
-    projected_earlystop_hours = projected_epoch_minutes * min(epochs, EARLY_STOP_PATIENCE + 2) / 60.0
+    base_step_seconds = (sum(base_timed) / len(base_timed)) * PREFLIGHT_STEP_TIME_FUDGE
+
+    rollout_step_seconds = None
+    rollout_fraction = SECONDARY_LOSS_SCHEDULE.rollout_step_fraction(epochs=epochs)
+    if rollout_fraction > 0.0:
+        rollout_epoch = SECONDARY_LOSS_SCHEDULE.rollout_warmup_epochs
+        _timed_preflight_step(
+            model,
+            warm_batch,
+            device,
+            use_amp,
+            epoch=rollout_epoch,
+            step=0,
+            force_rollout=True,
+        )
+        rollout_timed = [
+            _timed_preflight_step(
+                model,
+                sampled[i],
+                device,
+                use_amp,
+                epoch=rollout_epoch,
+                step=i,
+                force_rollout=True,
+            )
+            for i in range(n_timed)
+        ]
+        rollout_step_seconds = (sum(rollout_timed) / len(rollout_timed)) * PREFLIGHT_STEP_TIME_FUDGE
+
+    est_step_seconds, projected_epoch_minutes, projected_earlystop_hours, rollout_fraction = _project_training_runtime(
+        base_step_seconds=base_step_seconds,
+        rollout_step_seconds=rollout_step_seconds,
+        steps_per_epoch=len(loader),
+        epochs=epochs,
+    )
 
     print(
         "[preflight] "
         f"token_eff={mean_token_eff:.3f}  "
         f"anchor_eff={mean_anchor_eff:.3f}  "
         f"recur_eff={mean_recur_eff:.3f}  "
+        f"base={base_step_seconds:.2f}s  "
+        + (
+            f"rollout={rollout_step_seconds:.2f}s  "
+            if rollout_step_seconds is not None else
+            "rollout=off  "
+        )
+        + f"rollout_frac={rollout_fraction:.3f}  "
         f"step={est_step_seconds:.2f}s  "
         f"epoch≈{projected_epoch_minutes:.1f}m  "
         f"earlystop≈{projected_earlystop_hours:.1f}h",
@@ -490,6 +673,9 @@ def run_training_preflight(
         "token_eff": mean_token_eff,
         "anchor_eff": mean_anchor_eff,
         "recur_eff": mean_recur_eff,
+        "base_step_seconds": base_step_seconds,
+        "rollout_step_seconds": rollout_step_seconds,
+        "rollout_step_fraction": rollout_fraction,
         "step_seconds": est_step_seconds,
         "projected_epoch_minutes": projected_epoch_minutes,
         "projected_earlystop_hours": projected_earlystop_hours,
@@ -519,8 +705,21 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     print(f"device={device}  amp={use_amp}  params={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    print(
+        "secondary loss schedule  "
+        f"decision_stride={SECONDARY_LOSS_SCHEDULE.decision_stride}  "
+        f"frame_stride={SECONDARY_LOSS_SCHEDULE.frame_stride}  "
+        f"rollout_warmup_epochs={SECONDARY_LOSS_SCHEDULE.rollout_warmup_epochs}  "
+        f"rollout_batch_stride={SECONDARY_LOSS_SCHEDULE.rollout_batch_stride}",
+        flush=True,
+    )
 
-    history = {"train_loss": [], "game_cold_auc15": [], "player_cold_auc15": []}
+    history = {
+        "train_loss": [],
+        "train_total_loss": [],
+        "game_cold_auc15": [],
+        "player_cold_auc15": [],
+    }
     best_cold_auc = -1.0
     patience_left = EARLY_STOP_PATIENCE
     best_path = os.path.join(CHECKPOINT_DIR, f"{checkpoint_tag}_best.pt")
@@ -565,14 +764,17 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     for ep in range(epochs):
         model.train()
         ep_start = time.time()
-        ep_loss = 0.0
+        ep_core_loss = 0.0
+        ep_total_loss = 0.0
         n_batches = 0
         for step, batch in enumerate(loader, start=1):
+            train_step = step - 1
             batch = _batch_to_device(batch, device)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 out = model(batch)
-                losses = _compute_losses(out, batch)
-                aux = _rollout_aux_loss(model, out, batch)
+                losses = _compute_losses(out, batch, epoch=ep, step=train_step)
+                aux = _rollout_aux_loss(model, out, batch, epoch=ep, step=train_step)
+                core_loss = _combined_loss(losses, 0.0)
                 loss = _combined_loss(losses, aux)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -580,7 +782,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
-            ep_loss += float(loss.item())
+            ep_core_loss += float(core_loss.item())
+            ep_total_loss += float(loss.item())
             n_batches += 1
             if log_every > 0 and (step == 1 or step % log_every == 0 or step == n_train_batches):
                 elapsed = time.time() - ep_start
@@ -588,12 +791,15 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                 eta = avg_step * max(n_train_batches - step, 0)
                 print(
                     f"epoch {ep+1}/{epochs}  step {step}/{n_train_batches}  "
-                    f"loss={loss.item():.4f}  avg_step={avg_step:.2f}s  eta={eta:.1f}s"
+                    f"core_loss={core_loss.item():.4f}  total_loss={loss.item():.4f}  "
+                    f"avg_step={avg_step:.2f}s  eta={eta:.1f}s"
                     ,
                     flush=True,
                 )
-        ep_loss /= max(1, n_batches)
-        history["train_loss"].append(ep_loss)
+        ep_core_loss /= max(1, n_batches)
+        ep_total_loss /= max(1, n_batches)
+        history["train_loss"].append(ep_core_loss)
+        history["train_total_loss"].append(ep_total_loss)
 
         game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15)
         cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15) if cold_ds else 0.5
@@ -601,7 +807,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         history["player_cold_auc15"].append(cold_auc)
 
         print(
-            f"epoch {ep+1}/{epochs} done  loss={ep_loss:.4f}  "
+            f"epoch {ep+1}/{epochs} done  core_loss={ep_core_loss:.4f}  "
+            f"total_loss={ep_total_loss:.4f}  "
             f"game_cold_auc15={game_auc:.3f}  player_cold_auc15={cold_auc:.3f}",
             flush=True,
         )
@@ -613,6 +820,14 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                 "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
                 "max_puuids": max_puuids,
                 "history": history,
+                "loss_config": {
+                    "head_weights": dict(HEAD_WEIGHTS),
+                    "kl_weight_loss": KL_WEIGHT_LOSS,
+                    "free_bits_per_dim": FREE_BITS_PER_DIM,
+                    "rollout_steps": ROLLOUT_STEPS,
+                    "rollout_loss_weights": list(ROLLOUT_LOSS_WEIGHTS),
+                    "secondary_schedule": asdict(SECONDARY_LOSS_SCHEDULE),
+                },
             }, best_path)
         else:
             patience_left -= 1

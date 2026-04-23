@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence
 
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -43,7 +44,7 @@ class RSSMCore(nn.Module):
         self.d_h = d_h
         self.d_z = d_z
 
-        self.gru = nn.GRUCell(input_size=d_action + d_z, hidden_size=d_h)
+        self.gru = nn.GRU(input_size=d_action + d_z, hidden_size=d_h, batch_first=True)
 
         self.prior_net = nn.Sequential(
             nn.Linear(d_h, d_hidden), nn.GELU(),
@@ -66,5 +67,63 @@ class RSSMCore(nn.Module):
 
     def step(self, h, z, action_summary):
         """Advance h given previous z and the action/event summary for the window."""
-        inp = torch.cat([action_summary, z], dim=-1)
-        return self.gru(inp, h)
+        inp = torch.cat([action_summary, z], dim=-1).unsqueeze(1)
+        _, h_next = self.gru(inp, h.unsqueeze(0))
+        return h_next.squeeze(0)
+
+    def scan(self, h, z, action_sequence, mask: torch.Tensor | None = None,
+             lengths: torch.Tensor | None = None):
+        """Advance h over an ordered action/event sequence, ignoring padded suffixes."""
+        if action_sequence is None:
+            return h
+        if action_sequence.dim() != 3:
+            raise ValueError("action_sequence must have shape (batch, steps, d_action)")
+
+        batch_size, max_steps, _ = action_sequence.shape
+        if max_steps == 0:
+            return h
+
+        if lengths is None:
+            if mask is None:
+                lengths = torch.full(
+                    (batch_size,),
+                    max_steps,
+                    dtype=torch.long,
+                    device=action_sequence.device,
+                )
+            else:
+                lengths = mask.to(dtype=torch.long).sum(dim=1)
+        else:
+            lengths = lengths.to(device=action_sequence.device, dtype=torch.long)
+
+        active_idx = torch.nonzero(lengths > 0, as_tuple=False).squeeze(-1)
+        if active_idx.numel() == 0:
+            return h
+
+        active_lengths = lengths.index_select(0, active_idx)
+        active_max_steps = int(active_lengths.max().item())
+        if active_max_steps == 0:
+            return h
+
+        active_actions = action_sequence.index_select(0, active_idx)[:, :active_max_steps]
+        active_z = z.index_select(0, active_idx).unsqueeze(1).expand(-1, active_max_steps, -1)
+        gru_input = torch.cat([active_actions, active_z], dim=-1)
+
+        sorted_lengths, sort_order = torch.sort(active_lengths, descending=True)
+        gru_input = gru_input.index_select(0, sort_order)
+        h0 = h.index_select(0, active_idx).index_select(0, sort_order).unsqueeze(0)
+
+        packed = pack_padded_sequence(
+            gru_input,
+            sorted_lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=True,
+        )
+        _, h_sorted = self.gru(packed, h0)
+
+        _, unsort_order = torch.sort(sort_order)
+        h_active = h_sorted.squeeze(0).index_select(0, unsort_order)
+
+        updated_h = h.clone()
+        updated_h[active_idx] = h_active
+        return updated_h
