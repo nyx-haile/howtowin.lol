@@ -6,7 +6,8 @@
 ## Experiment metadata
 
 - **Project:** howtowin.lol
-- **Experiment slug:** `howl/exp/canonical-world-model-v1`
+- **Draft name:** `canonical-world-model-v1-root`
+- **Experiment slug:** `howl/exp/canonical-world-model-v1-root`
 - **Experiment type:** supervised root experiment
 - **Owner:** Nyx
 - **Status:** proposed
@@ -113,15 +114,19 @@ Use the current documented Plan B + retrieval stack as the control.
 
 - outcome signal exists;
 - leak discipline is acceptable;
-- retrieval is still the main bottleneck between the world model and the teaching surface.
+- retrieval is still the main bottleneck between the world model and the teaching surface;
+- **higher entropy@64 is better** because it indicates less degenerate retrieval cohorts at `k=64`;
+- the current model underperforms the frame-features baseline, so the goal is to raise model entropy toward `0.826` / `0.834`, not lower it.
 
 ## Hypothesis
 
 If we improve state fidelity and preserve the current retrieval contract, then:
 
-1. player-cold retrieval quality should improve materially;
-2. outcome performance should stay at or near the current baseline;
-3. lesson candidates should become more specific and more teachable.
+1. `player_cold_m4_entropy_at_64` should improve by at least `0.02` bits over the current model baseline (`0.706` → `>= 0.726`);
+2. outcome performance should stay within `0.02` AUC of the current baselines;
+3. lesson candidates should become more specific and more teachable in human review.
+
+**Important:** item 3 is a human-review hypothesis, not a machine-checkable pass/fail gate. The agent should generate lesson samples and a failure taxonomy, but should **not** self-grade lesson quality as success or failure.
 
 ## Primary metric
 
@@ -138,12 +143,12 @@ Rationale:
 - `player_cold_auc_at_15`
 - `game_cold_auc_at_15`
 - `leak_probe_auc_at_15`
-- rollout top-5 by step
-- lesson candidate quality on a manual QA set
+- `rollout_top5_by_step` — next-event-type top-5 accuracy at rollout steps `1..3` from `plan-b-eval`; “by step” indexes the imagination horizon after seeding on the final real anchor
+- lesson candidate quality on a manual QA set (**human review only**)
 
 ## Success criteria
 
-This root experiment is considered a success if all of the following hold.
+This root experiment is considered a success if all of the following machine-checkable conditions hold.
 
 ### Required
 
@@ -156,16 +161,17 @@ This root experiment is considered a success if all of the following hold.
 ### Strong success
 
 - retrieval gets within `0.05` bits of the frame-features baseline on both holdouts;
-- lesson candidates become more decision-specific in manual review.
+- at least one Child `2`–`4` run improves `player_cold_m4_entropy_at_64` by `>= 0.02` bits over the reproduced control;
+- human QA finds lesson candidates more decision-specific than the reproduced control.
 
 ## Failure / stop conditions
 
 Stop or mark failed if any of the following occur:
 
 - leak probe rises above `0.55`;
-- retrieval entropy falls below the current baseline by more than `0.03` bits;
-- outcome AUC collapses on either holdout;
-- training succeeds numerically but lesson candidates become more generic;
+- retrieval entropy falls below the current model baseline by more than `0.03` bits on either holdout;
+- outcome AUC@15 regresses by more than `0.02` on either holdout;
+- Child 1 fails the baseline-reproduction tolerances defined below;
 - an experiment changes split definitions or introduces holdout contamination;
 - conclusions are based only on train loss.
 
@@ -173,7 +179,15 @@ Stop or mark failed if any of the following occur:
 
 ### Root
 
-`howl/exp/canonical-world-model-v1`
+`howl/exp/canonical-world-model-v1-root`
+
+**Root experiment action**
+
+- Execute **Child 1** directly as the root run.
+- Compare the reproduced control numbers against the documented baselines using the tolerances below.
+- Only if Child 1 passes should the root propose or launch **Children 2–4** as follow-up ablations.
+- Children `2`–`4` may run in parallel because they test different causal hypotheses.
+- **Child 5** is gated on at least one of Children `2`–`4` improving `player_cold_m4_entropy_at_64` over the reproduced control.
 
 ### Child 1 — baseline reproduction
 
@@ -181,12 +195,39 @@ Stop or mark failed if any of the following occur:
 
 - reproduce the current documented Plan B + retrieval numbers.
 
+**Success criteria**
+
+Reproduced numbers must fall within the following tolerances of the documented baselines:
+
+- AUC metrics: within `±0.005`
+- entropy metrics: within `±0.01`
+- leak probe: must remain `<= 0.55`
+
+Concretely, the reproduced run should land within tolerance for:
+
+- game-cold AUC@15 (`0.884`)
+- player-cold AUC@15 (`0.841`)
+- leak probe AUC@15 (`0.531`)
+- model entropy@64 on game-cold (`0.720`)
+- model entropy@64 on player-cold (`0.706`)
+- frame-features baseline entropy@64 on game-cold (`0.826`)
+- frame-features baseline entropy@64 on player-cold (`0.834`)
+
+If reproduction fails outside these tolerances, stop before ablations and diagnose likely causes:
+
+- data version mismatch
+- split file hash mismatch
+- dependency version drift
+- hardware / environment drift
+- random-seed sensitivity
+
 **Outputs**
 
-- fresh outcome eval report,
-- fresh retrieval eval report,
-- exact command log,
-- checkpoint hash.
+- fresh outcome eval report
+- fresh retrieval eval report
+- exact command log
+- checkpoint hash
+- lockfile hash
 
 ### Child 2 — anchor / state-fidelity ablation
 
@@ -194,12 +235,23 @@ Stop or mark failed if any of the following occur:
 
 - test richer state features.
 
-**Candidates**
+**Default first ablation**
 
-- inventory summaries,
-- warding summaries,
-- health / power summaries,
-- richer objective state.
+- add inventory summary features (`item-slot occupancy` + `gold-efficiency ratio`) to the per-anchor participant frame.
+
+**Expected effect**
+
+- improve state fidelity around item power spikes and decision points with minimal engineering overhead.
+
+**Primary metric**
+
+- `player_cold_m4_entropy_at_64`
+
+**Other candidate follow-ups**
+
+- warding summaries
+- health / power summaries
+- richer objective state
 
 ### Child 3 — decision-semantics ablation
 
@@ -207,11 +259,22 @@ Stop or mark failed if any of the following occur:
 
 - improve inferred or factorized decision / event quality.
 
-**Candidates**
+**Default first ablation**
 
-- recall heuristic cleanup,
-- engage / disengage heuristic refinement,
-- payload-head weighting changes.
+- clean up the recall heuristic by cross-referencing base-arrival events with recall-start inference to reduce false positives, especially around deaths near base.
+
+**Expected effect**
+
+- fewer noisy decision tokens and a cleaner latent space for retrieval.
+
+**Primary metric**
+
+- `player_cold_m4_entropy_at_64`
+
+**Other candidate follow-ups**
+
+- engage / disengage heuristic refinement
+- payload-head weighting changes
 
 ### Child 4 — retrieval-focused training ablation
 
@@ -219,11 +282,22 @@ Stop or mark failed if any of the following occur:
 
 - improve latent structure for retrieval.
 
-**Candidates**
+**Default first ablation**
 
-- loss-weight changes,
-- representation regularization,
-- curriculum or head-balancing changes.
+- increase retrieval-head loss weight by `2x` relative to the outcome-head loss weight.
+
+**Expected effect**
+
+- test whether the latent space is currently under-optimized for retrieval structure.
+
+**Primary metric**
+
+- `player_cold_m4_entropy_at_64`
+
+**Other candidate follow-ups**
+
+- representation regularization
+- curriculum or head-balancing changes
 
 ### Child 5 — lesson QA
 
@@ -231,22 +305,33 @@ Stop or mark failed if any of the following occur:
 
 - test whether better retrieval actually yields better teaching examples.
 
+**Gate**
+
+- run only after at least one of Children `2`–`4` improves `player_cold_m4_entropy_at_64` over the reproduced control.
+
 **Outputs**
 
-- 20-game manual review set,
-- mistake + strength lesson assessment,
-- failure taxonomy.
+- 20-game manual review set
+- mistake + strength lesson assessment
+- failure taxonomy
+- side-by-side comparison between the reproduced control and the best-improved ablation
 
 ## Artifacts required from every run
 
 - checkpoint path
+- checkpoint SHA256
 - code commit SHA
-- split file hashes
+- `uv.lock` path and SHA256
+- split file paths and SHA256 for:
+  - `data/splits/plan_a_holdout.txt`
+  - `data/splits/plan_b_cold_holdout.txt`
+- copied split files in the artifact bundle if the runner does not automatically preserve repo-versioned inputs
 - config / hyperparameters
+- exact commands
 - training log
 - outcome eval output
 - retrieval eval output
-- lesson samples from at least 3 held-out games
+- lesson samples from at least `3` held-out games
 - short decision memo:
   - what changed,
   - what improved,
@@ -283,12 +368,22 @@ uv run python -m model.cli retrieval-eval --baselines
 
 ### Lesson candidate generation
 
+Use the first `3` match IDs from `data/splits/plan_a_holdout.txt` for the minimum required sample set:
+
+- `NA1_5439588777`
+- `NA1_5516680826`
+- `NA1_5517996204`
+
 ```bash
-uv run python -m model.cli lesson --match-id <MATCH_ID> --team blue
+uv run python -m model.cli lesson --match-id NA1_5439588777 --team blue
+uv run python -m model.cli lesson --match-id NA1_5516680826 --team blue
+uv run python -m model.cli lesson --match-id NA1_5517996204 --team blue
 ```
 
-## Agent operating rules
+## Reproducibility rules
 
+- Use the committed `uv.lock` for every run. If it is missing or intentionally regenerated, record the new lockfile hash as an artifact before training.
+- The current in-repo CLI does **not** expose a `--seed` flag. For non-seed-sensitivity runs, keep the training seed behavior fixed to the current code path and record it explicitly in artifacts. If a runner adds an explicit seed parameter before launch, pin it to `42`.
 - Do **not** change holdout splits.
 - Do **not** use held-out matches in player aggregates.
 - Do **not** optimize solely for train loss.
@@ -301,6 +396,16 @@ uv run python -m model.cli lesson --match-id <MATCH_ID> --team blue
   - one primary metric.
 - If a run fails, produce a short failure diagnosis before launching the next run.
 
+## Suggested monitor cadence
+
+If the runner supports a monitor cron, use:
+
+```text
+*/5 * * * *
+```
+
+This run is likely to take on the order of `1`–`4` hours depending on hardware, so a `5`-minute monitor cadence is appropriate.
+
 ## Human review gate
 
 Auto-generated experiment conclusions are suggestions, not final truth.
@@ -311,6 +416,8 @@ A human should approve:
 - any public claim of improvement;
 - any lesson-quality claim;
 - any decision to replace the current baseline.
+
+The agent should generate lesson samples and manual-review evidence, but should **not** self-assess “more specific,” “more teachable,” or “more generic” as an automatic pass/fail result.
 
 ## Data handling note
 
@@ -329,4 +436,4 @@ At the end of this root experiment tree, Thesis should produce:
 1. the best validated checkpoint;
 2. a ranked summary of ablations;
 3. a clear answer on whether retrieval quality improved enough to justify downstream lesson work;
-4. the next 3 highest-value experiments.
+4. the next `3` highest-value experiments.
