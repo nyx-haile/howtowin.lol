@@ -203,7 +203,11 @@ class PlanBModel(nn.Module):
     def _gather_event_window(self, token_emb: torch.Tensor, batch, anchor_idx: int):
         offsets = batch["event_window_offsets"][:, anchor_idx]
         counts = batch["event_window_counts"][:, anchor_idx]
-        max_count = int(counts.max().item()) if counts.numel() else 0
+        precomputed = batch.get("max_event_window_per_anchor")
+        if precomputed is not None:
+            max_count = precomputed[anchor_idx] if counts.numel() else 0
+        else:
+            max_count = int(counts.max().item()) if counts.numel() else 0
         if max_count == 0:
             return None, None
 
@@ -226,8 +230,6 @@ class PlanBModel(nn.Module):
         if event_window_emb is None or event_mask is None:
             return h
         lengths = event_mask.to(dtype=torch.long).sum(dim=1)
-        if lengths.max().item() == 0:
-            return h
 
         static_ctx = self._static_event_context(z, event_window_emb, static_key, static_value)
         conditioned_action = event_window_emb + self.static_to_action(static_ctx)
@@ -251,6 +253,7 @@ class PlanBModel(nn.Module):
         anchor_mask: torch.Tensor,
         start_anchor: int,
         n_steps: int,
+        n_valid_anchors: int | None = None,
     ) -> list[dict[str, torch.Tensor]]:
         if h0.dim() == 1:
             h = h0.unsqueeze(0)
@@ -268,21 +271,23 @@ class PlanBModel(nn.Module):
 
         zero_action = self._zero_action(h.size(0), h.device)
         outputs = []
-        n_valid_anchors = int(anchor_mask.sum().item())
+        if n_valid_anchors is None:
+            n_valid_anchors = int(anchor_mask.sum().item())
         max_steps = min(n_steps, max(n_valid_anchors - start_anchor - 1, 0))
 
+        gpu_device = h.device
         for step_idx in range(max_steps):
             window_idx = start_anchor + step_idx
             count = int(event_window_counts[window_idx].item())
             if count > 0:
                 start = int(event_window_offsets[window_idx].item())
-                positions = event_window_positions[start:start + count].long()
+                positions = event_window_positions[start:start + count].to(gpu_device)
                 window_events = token_embeddings.index_select(0, positions).unsqueeze(0)
-                window_mask = torch.ones(1, count, dtype=torch.bool, device=h.device)
+                window_mask = torch.ones(1, count, dtype=torch.bool, device=gpu_device)
                 h = self._advance_event_window(h, z, window_events, window_mask, static_key, static_value)
 
-            static_ctx, static_attn = self._static_context(
-                h, z, zero_action, static_key, static_value, need_weights=True
+            static_ctx, _ = self._static_context(
+                h, z, zero_action, static_key, static_value, need_weights=False
             )
             prior_mu, prior_logvar = self.rssm.prior(h)
             z = reparameterize(prior_mu, prior_logvar)
@@ -295,7 +300,6 @@ class PlanBModel(nn.Module):
                     "prior_logvar": prior_logvar,
                     "anchor_repr": anchor_repr,
                     "static_context": static_ctx,
-                    "static_attention_weights": static_attn,
                 }
             )
         return outputs
@@ -321,12 +325,13 @@ class PlanBModel(nn.Module):
         post_mu_all, post_logvar_all = [], []
         prior_mu_all, prior_logvar_all = [], []
         z_all, h_all = [], []
-        static_ctx_all, static_attn_all = [], []
+        static_ctx_all = []
 
         for t in range(T):
             valid_anchor = anchor_mask[:, t].unsqueeze(-1)
-            static_ctx, static_attn = self._static_context(
-                h, z, zero_action, static_key, static_value, need_weights=True
+            mask = valid_anchor.to(h.dtype)
+            static_ctx, _ = self._static_context(
+                h, z, zero_action, static_key, static_value, need_weights=False
             )
             conditioned_obs = obs[:, t] + self.static_to_obs(static_ctx)
             pr_mu, pr_lv = self.rssm.prior(h)
@@ -334,19 +339,13 @@ class PlanBModel(nn.Module):
             z_post = reparameterize(po_mu, po_lv)
             z = torch.where(valid_anchor, z_post, z)
 
-            zero_h = torch.zeros_like(h)
-            zero_z = torch.zeros_like(z)
-            zero_obs = torch.zeros_like(po_mu)
-            zero_ctx = torch.zeros_like(static_ctx)
-            zero_attn = torch.zeros_like(static_attn)
-            h_all.append(torch.where(valid_anchor, h, zero_h))
-            z_all.append(torch.where(valid_anchor, z, zero_z))
-            prior_mu_all.append(torch.where(valid_anchor, pr_mu, zero_obs))
-            prior_logvar_all.append(torch.where(valid_anchor, pr_lv, zero_obs))
-            post_mu_all.append(torch.where(valid_anchor, po_mu, zero_obs))
-            post_logvar_all.append(torch.where(valid_anchor, po_lv, zero_obs))
-            static_ctx_all.append(torch.where(valid_anchor, static_ctx, zero_ctx))
-            static_attn_all.append(torch.where(valid_anchor, static_attn, zero_attn))
+            h_all.append(h * mask)
+            z_all.append(z * mask)
+            prior_mu_all.append(pr_mu * mask)
+            prior_logvar_all.append(pr_lv * mask)
+            post_mu_all.append(po_mu * mask)
+            post_logvar_all.append(po_lv * mask)
+            static_ctx_all.append(static_ctx * mask)
 
             if t < T - 1:
                 event_window_emb, event_mask = self._gather_event_window(token_emb, batch, t)
@@ -359,7 +358,6 @@ class PlanBModel(nn.Module):
         prior_mu = torch.stack(prior_mu_all, dim=1)
         prior_lv = torch.stack(prior_logvar_all, dim=1)
         static_context = torch.stack(static_ctx_all, dim=1)
-        static_attn = torch.stack(static_attn_all, dim=1)
         anchor_repr = self.anchor_representation(H, Z)
 
         decoded = self.decode_anchor_repr(anchor_repr.view(B * T, D_R))
@@ -387,7 +385,6 @@ class PlanBModel(nn.Module):
             "anchor_mask": anchor_mask,
             "static_tokens": static_tokens,
             "static_context": static_context,
-            "static_attention_weights": static_attn,
             "token_embeddings": token_emb,
             "n_anchors": T,
             "h_final": h,

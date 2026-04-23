@@ -80,7 +80,7 @@ def train_loop(
         tot_loss = 0.0
         n_batches = 0
         for step, batch in enumerate(train_dl):
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             logits = model(batch)
             loss = masked_bce_loss(logits, batch["labels"], batch["label_mask"])
             opt.zero_grad()
@@ -100,7 +100,7 @@ def train_loop(
             val_top5 = 0.0
             v_batches = 0
             for batch in val_dl:
-                batch = {k: v.to(device) for k, v in batch.items()}
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
                 logits = model(batch)
                 val_loss += masked_bce_loss(logits, batch["labels"], batch["label_mask"]).item()
                 val_top5 += top5_accuracy(logits, batch["labels"], batch["label_mask"]).item()

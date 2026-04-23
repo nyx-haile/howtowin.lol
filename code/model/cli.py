@@ -92,7 +92,8 @@ def cmd_plan_b_train(args):
                       persistent_workers=args.persistent_workers,
                       loader_order=args.loader_order,
                       train_cache_size=args.train_cache_size,
-                      checkpoint_tag="plan_b_full")
+                      checkpoint_tag="plan_b_full",
+                      compile_model=args.compile_model)
 
 
 def cmd_plan_b_eval(args):
@@ -403,6 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="loader_order",
     )
     p_pb_tr.add_argument("--train-cache-size", type=int, default=None, dest="train_cache_size")
+    p_pb_tr.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="compile_model",
+    )
     sub.add_parser("plan-b-eval")
 
     p_rb = sub.add_parser("retrieval-build")

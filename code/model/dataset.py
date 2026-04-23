@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections import OrderedDict
 
 import numpy as np
@@ -16,6 +17,23 @@ import torch
 from torch.utils.data import Dataset
 
 from db import get_conn
+
+_sample_conn_local = threading.local()
+
+
+def _get_sample_conn():
+    """Thread-local read-only connection for DataLoader workers. Never call close() on the result."""
+    from db import _resolve_db_path
+    resolved = _resolve_db_path()
+    conn = getattr(_sample_conn_local, "conn", None)
+    if conn is None:
+        import sqlite3
+        conn = sqlite3.connect(resolved)
+        conn.row_factory = __import__("sqlite3").Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _sample_conn_local.conn = conn
+    return conn
 from raw_db import get_raw_match_only
 from model.player_match_stats import PLAYER_MATCH_STATS_TABLE, ensure_player_match_stats
 from model.cold_holdout import load_player_cold_holdout
@@ -309,27 +327,24 @@ class MatchDataset(Dataset):
         anchor_idx = [j for j, tok in enumerate(tokens) if tok.type_id == ANCHOR_TOKEN]
         anchor_ts = [tokens[j].timestamp_ms for j in anchor_idx]
 
-        conn = get_conn()
-        try:
-            objective_placeholders = ",".join("?" for _ in OBJECTIVE_EVENT_TYPES_SQL)
-            all_frame_rows = conn.execute(
-                "SELECT timestamp_ms, participant_slot, team_id, current_gold, total_gold, xp, level, cs, jungle_cs, pos_x, pos_y, kills, deaths, assists "
-                "FROM frames WHERE match_id = ? AND participant_slot BETWEEN 1 AND 10",
-                (mid,),
-            ).fetchall()
-            all_event_rows = conn.execute(
-                f"SELECT timestamp_ms, event_type, killer_team, team_id, details "
-                f"FROM events "
-                f"WHERE match_id = ? AND event_type IN ({objective_placeholders}) "
-                f"ORDER BY timestamp_ms",
-                (mid, *OBJECTIVE_EVENT_TYPES_SQL),
-            ).fetchall()
-            game_row = conn.execute(
-                "SELECT winning_team FROM games WHERE match_id = ?",
-                (mid,),
-            ).fetchone()
-        finally:
-            conn.close()
+        conn = _get_sample_conn()
+        objective_placeholders = ",".join("?" for _ in OBJECTIVE_EVENT_TYPES_SQL)
+        all_frame_rows = conn.execute(
+            "SELECT timestamp_ms, participant_slot, team_id, current_gold, total_gold, xp, level, cs, jungle_cs, pos_x, pos_y, kills, deaths, assists "
+            "FROM frames WHERE match_id = ? AND participant_slot BETWEEN 1 AND 10",
+            (mid,),
+        ).fetchall()
+        all_event_rows = conn.execute(
+            f"SELECT timestamp_ms, event_type, killer_team, team_id, details "
+            f"FROM events "
+            f"WHERE match_id = ? AND event_type IN ({objective_placeholders}) "
+            f"ORDER BY timestamp_ms",
+            (mid, *OBJECTIVE_EVENT_TYPES_SQL),
+        ).fetchall()
+        game_row = conn.execute(
+            "SELECT winning_team FROM games WHERE match_id = ?",
+            (mid,),
+        ).fetchone()
 
         ts_to_slots = {}
         for r in all_frame_rows:
@@ -601,6 +616,7 @@ def collate_games(samples):
             flat_event_positions.extend(int(pos) for pos in positions)
 
     event_window_positions = torch.tensor(flat_event_positions, dtype=torch.long) if flat_event_positions else torch.zeros(0, dtype=torch.long)
+    max_event_window_per_anchor = event_window_counts.amax(dim=0).tolist()
 
     return {
         "static": torch.stack([s["static"] for s in samples]),
@@ -626,6 +642,7 @@ def collate_games(samples):
         "event_window_positions": event_window_positions,
         "event_window_offsets": event_window_offsets,
         "event_window_counts": event_window_counts,
+        "max_event_window_per_anchor": max_event_window_per_anchor,
         "frame_features": frame_features,
         "anchor_macro_features": anchor_macro_features,
         "decision_labels": decision_labels,

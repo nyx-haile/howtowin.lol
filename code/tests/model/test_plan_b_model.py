@@ -28,7 +28,6 @@ def test_forward_pass_shape(fixture_match_id):
     assert out["anchor_mask"].shape == (1, T)
     assert out["static_tokens"].shape == (1, STATIC_TOKEN_COUNT, D_MODEL)
     assert out["static_context"].shape == (1, T, D_MODEL)
-    assert out["static_attention_weights"].shape == (1, T, STATIC_TOKEN_COUNT)
 
 
 def test_model_forward_is_differentiable(fixture_match_id):

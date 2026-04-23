@@ -615,11 +615,15 @@ def _rollout_aux_loss(
 
     device = out["outcome_logits"].device
     anchor_mask = _anchor_mask(batch)
+    n_anchors_per = anchor_mask.sum(dim=1).cpu()  # one D2H for the whole batch
+    ew_counts_cpu = batch["event_window_counts"].cpu()
+    ew_offsets_cpu = batch["event_window_offsets"].cpu()
+    ew_positions_cpu = batch["event_window_positions"].cpu()
     total = torch.tensor(0.0, device=device)
     weight_total = 0.0
 
     for b in range(anchor_mask.size(0)):
-        n_anchors = int(anchor_mask[b].sum().item())
+        n_anchors = int(n_anchors_per[b])
         if n_anchors < 2 + ROLLOUT_STEPS:
             continue
 
@@ -629,12 +633,13 @@ def _rollout_aux_loss(
             z0=out["z"][b, seed_t],
             static_tokens=out["static_tokens"][b],
             token_embeddings=out["token_embeddings"][b],
-            event_window_positions=batch["event_window_positions"],
-            event_window_offsets=batch["event_window_offsets"][b],
-            event_window_counts=batch["event_window_counts"][b],
+            event_window_positions=ew_positions_cpu,
+            event_window_offsets=ew_offsets_cpu[b],
+            event_window_counts=ew_counts_cpu[b],
             anchor_mask=anchor_mask[b],
             start_anchor=seed_t,
             n_steps=ROLLOUT_STEPS,
+            n_valid_anchors=n_anchors,
         )
 
         for step_idx, step_out in enumerate(rollout_steps):
@@ -689,10 +694,10 @@ def _project_training_runtime(
 
 
 @torch.no_grad()
-def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15) -> float:
+def _eval_outcome_auc_at_minute(model, ds, device, target_minute: int = 15, num_workers: int = 0) -> float:
     from sklearn.metrics import roc_auc_score
 
-    loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False, num_workers=0, pin_memory=(device.type == "cuda"))
+    loader = DataLoader(ds, batch_size=8, collate_fn=collate_games, shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda"))
     y_true, y_score = [], []
     model.eval()
     for batch in loader:
@@ -741,13 +746,14 @@ def _run_preflight_loaded_batch(
     device,
     use_amp: bool,
     *,
+    amp_dtype=torch.bfloat16,
     epoch: int = 0,
     step: int = 0,
     force_rollout: bool | None = None,
 ):
     batch = _batch_to_device(batch, device)
     model.zero_grad(set_to_none=True)
-    with torch.amp.autocast("cuda", enabled=use_amp):
+    with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
         out = model(batch)
         losses = _compute_losses(out, batch, epoch=epoch, step=step)
         aux = _rollout_aux_loss(model, out, batch, epoch=epoch, step=step, force=force_rollout)
@@ -763,6 +769,7 @@ def _timed_preflight_iteration(
     device,
     use_amp: bool,
     *,
+    amp_dtype=torch.bfloat16,
     epoch: int = 0,
     step: int = 0,
     force_rollout: bool | None = None,
@@ -776,6 +783,7 @@ def _timed_preflight_iteration(
         batch,
         device,
         use_amp,
+        amp_dtype=amp_dtype,
         epoch=epoch,
         step=step,
         force_rollout=force_rollout,
@@ -791,6 +799,7 @@ def _measure_preflight_pass(
     device,
     use_amp: bool,
     *,
+    amp_dtype=torch.bfloat16,
     timed_batches: int,
     epoch: int = 0,
     force_rollout: bool | None = None,
@@ -802,36 +811,21 @@ def _measure_preflight_pass(
     iterator = iter(loader)
     if available == 1:
         elapsed, _ = _timed_preflight_iteration(
-            model,
-            iterator,
-            device,
-            use_amp,
-            epoch=epoch,
-            step=0,
-            force_rollout=force_rollout,
+            model, iterator, device, use_amp,
+            amp_dtype=amp_dtype, epoch=epoch, step=0, force_rollout=force_rollout,
         )
         return [elapsed]
 
     _timed_preflight_iteration(
-        model,
-        iterator,
-        device,
-        use_amp,
-        epoch=epoch,
-        step=0,
-        force_rollout=force_rollout,
+        model, iterator, device, use_amp,
+        amp_dtype=amp_dtype, epoch=epoch, step=0, force_rollout=force_rollout,
     )
     n_timed = max(1, min(timed_batches, available - 1))
     timed = []
     for step_idx in range(n_timed):
         elapsed, _ = _timed_preflight_iteration(
-            model,
-            iterator,
-            device,
-            use_amp,
-            epoch=epoch,
-            step=step_idx + 1,
-            force_rollout=force_rollout,
+            model, iterator, device, use_amp,
+            amp_dtype=amp_dtype, epoch=epoch, step=step_idx + 1, force_rollout=force_rollout,
         )
         timed.append(elapsed)
     return timed
@@ -844,6 +838,7 @@ def run_training_preflight(
     *,
     epochs: int,
     use_amp: bool,
+    amp_dtype=torch.bfloat16,
     sample_batches: int = PREFLIGHT_SAMPLE_BATCHES,
     timed_batches: int = PREFLIGHT_TIMED_BATCHES,
     min_token_efficiency: float = PREFLIGHT_MIN_TOKEN_EFFICIENCY,
@@ -872,13 +867,8 @@ def run_training_preflight(
 
         model.train()
         base_timed = _measure_preflight_pass(
-            model,
-            loader,
-            device,
-            use_amp,
-            timed_batches=timed_batches,
-            epoch=0,
-            force_rollout=False,
+            model, loader, device, use_amp,
+            amp_dtype=amp_dtype, timed_batches=timed_batches, epoch=0, force_rollout=False,
         )
         base_step_seconds = (sum(base_timed) / len(base_timed)) * PREFLIGHT_STEP_TIME_FUDGE
 
@@ -887,13 +877,9 @@ def run_training_preflight(
         if rollout_fraction > 0.0:
             rollout_epoch = SECONDARY_LOSS_SCHEDULE.rollout_warmup_epochs
             rollout_timed = _measure_preflight_pass(
-                model,
-                loader,
-                device,
-                use_amp,
-                timed_batches=timed_batches,
-                epoch=rollout_epoch,
-                force_rollout=True,
+                model, loader, device, use_amp,
+                amp_dtype=amp_dtype, timed_batches=timed_batches,
+                epoch=rollout_epoch, force_rollout=True,
             )
             rollout_step_seconds = (sum(rollout_timed) / len(rollout_timed)) * PREFLIGHT_STEP_TIME_FUDGE
 
@@ -975,13 +961,21 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       persistent_workers: bool | None = None,
                       loader_order: str = DEFAULT_LOADER_ORDER,
                       train_cache_size: int | None = None,
-                      run_preflight: bool = True):
+                      run_preflight: bool = True,
+                      compile_model: bool | None = None):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
 
     exclude = set(val_match_ids) | set(cold_match_ids)
     device = _get_device()
     use_amp = device.type == "cuda"
+    # BF16 autocast is safe (no GradScaler) on Ampere+ (sm80+); use fp16+scaler on Turing
+    if device.type == "cuda":
+        major, _ = torch.cuda.get_device_capability(device)
+        amp_dtype = torch.bfloat16 if major >= 8 else torch.float16
+    else:
+        amp_dtype = torch.bfloat16
+    use_scaler = use_amp and amp_dtype == torch.float16
     loader_config = _resolve_loader_runtime_config(
         device=device,
         num_workers=num_workers,
@@ -1001,12 +995,27 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     val_ds = MatchDataset(val_match_ids, puuid_index, exclude_match_ids=exclude)
     cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) if cold_match_ids else None
 
-    if use_amp:
-        torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
+    if device.type == "cuda" and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     model = PlanBModel(max_puuids=max_puuids).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    print(f"device={device}  amp={use_amp}  params={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    if compile_model is None:
+        if device.type == "cuda":
+            major, _ = torch.cuda.get_device_capability(device)
+            compile_model = major >= 8  # reduce-overhead needs Ampere+
+        else:
+            compile_model = False
+    if compile_model:
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("torch.compile enabled (reduce-overhead)", flush=True)
+        except Exception as e:
+            print(f"torch.compile failed, falling back to eager: {e}", flush=True)
+            compile_model = False
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, fused=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    print(f"device={device}  amp={use_amp}  amp_dtype={amp_dtype}  alloc_conf={alloc_conf!r}  compile={compile_model}  params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     print(
         "secondary loss schedule  "
         f"decision_stride={SECONDARY_LOSS_SCHEDULE.decision_stride}  "
@@ -1079,31 +1088,36 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
             device,
             epochs=epochs,
             use_amp=use_amp,
+            amp_dtype=amp_dtype,
         )
 
     for ep in range(epochs):
         model.train()
         ep_start = time.time()
-        ep_core_loss = 0.0
-        ep_total_loss = 0.0
+        ep_core_loss_sum = torch.tensor(0.0, device=device)
+        ep_loss_sum = torch.tensor(0.0, device=device)
         n_batches = 0
         for step, batch in enumerate(loader, start=1):
             train_step = step - 1
             batch = _batch_to_device(batch, device)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 out = model(batch)
                 losses = _compute_losses(out, batch, epoch=ep, step=train_step)
                 aux = _rollout_aux_loss(model, out, batch, epoch=ep, step=train_step)
-                core_loss = _combined_loss(losses, 0.0)
                 loss = _combined_loss(losses, aux)
             opt.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt)
-            scaler.update()
-            ep_core_loss += float(core_loss.item())
-            ep_total_loss += float(loss.item())
+            if use_scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+            ep_core_loss_sum = ep_core_loss_sum + _combined_loss(losses, 0.0).detach()
+            ep_loss_sum = ep_loss_sum + loss.detach()
             n_batches += 1
             if log_every > 0 and (step == 1 or step % log_every == 0 or step == n_train_batches):
                 elapsed = time.time() - ep_start
@@ -1111,24 +1125,23 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                 eta = avg_step * max(n_train_batches - step, 0)
                 print(
                     f"epoch {ep+1}/{epochs}  step {step}/{n_train_batches}  "
-                    f"core_loss={core_loss.item():.4f}  total_loss={loss.item():.4f}  "
-                    f"avg_step={avg_step:.2f}s  eta={eta:.1f}s"
-                    ,
+                    f"total_loss={loss.item():.4f}  "
+                    f"avg_step={avg_step:.2f}s  eta={eta:.1f}s",
                     flush=True,
                 )
-        ep_core_loss /= max(1, n_batches)
-        ep_total_loss /= max(1, n_batches)
+        ep_core_loss = float(ep_core_loss_sum.item()) / max(1, n_batches)
+        ep_total_loss = float(ep_loss_sum.item()) / max(1, n_batches)
         history["train_loss"].append(ep_core_loss)
         history["train_total_loss"].append(ep_total_loss)
 
-        game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15)
-        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15) if cold_ds else 0.5
+        game_auc = _eval_outcome_auc_at_minute(model, val_ds, device, 15, num_workers=loader_config.num_workers)
+        cold_auc = _eval_outcome_auc_at_minute(model, cold_ds, device, 15, num_workers=loader_config.num_workers) if cold_ds else 0.5
         history["game_cold_auc15"].append(game_auc)
         history["player_cold_auc15"].append(cold_auc)
 
         print(
-            f"epoch {ep+1}/{epochs} done  core_loss={ep_core_loss:.4f}  "
-            f"total_loss={ep_total_loss:.4f}  "
+            f"epoch {ep+1}/{epochs} done  "
+            f"core_loss={ep_core_loss:.4f}  total_loss={ep_total_loss:.4f}  "
             f"game_cold_auc15={game_auc:.3f}  player_cold_auc15={cold_auc:.3f}",
             flush=True,
         )
