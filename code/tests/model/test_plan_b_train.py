@@ -249,3 +249,95 @@ def test_training_preflight_rejects_impossible_runtime_budget(fixture_match_id):
             max_projected_epoch_minutes=0.0,
             max_projected_earlystop_hours=0.0,
         )
+
+
+def test_training_preflight_non_strict_writes_artifact_on_failure(fixture_match_id, tmp_path):
+    import json as _json
+    from torch.utils.data import DataLoader
+
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    from model.plan_b_model import PlanBModel
+
+    idx = build_puuid_index([fixture_match_id, fixture_match_id])
+    ds = MatchDataset([fixture_match_id, fixture_match_id], puuid_index=idx)
+    loader = DataLoader(
+        ds,
+        batch_sampler=BucketedBatchSampler([1, 1], batch_size=2, shuffle=False, bucket_size_multiplier=1),
+        collate_fn=collate_games,
+        num_workers=0,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = PlanBModel(max_puuids=len(idx) + 1).to(device)
+
+    artifact = tmp_path / "runtime_preflight.json"
+    metrics = run_training_preflight(
+        model,
+        loader,
+        device,
+        epochs=30,
+        use_amp=(device.type == "cuda"),
+        sample_batches=1,
+        timed_batches=1,
+        min_token_efficiency=0.0,
+        min_anchor_efficiency=0.0,
+        min_recur_efficiency=0.0,
+        max_projected_epoch_minutes=0.0,
+        max_projected_earlystop_hours=0.0,
+        strict=False,
+        sample_cache=ds.materialized_sample_cache,
+        artifact_path=str(artifact),
+    )
+
+    assert metrics["gate_a_pass"] is False
+    assert metrics["failures"], "expected at least one gate failure"
+
+    payload = _json.loads(artifact.read_text())
+    assert payload["gate_a_pass"] is False
+    assert payload["projected_early_stop_hours"] > 0.0
+    assert "cache_hit_rate" in payload
+    assert isinstance(payload["cache_hit_rate"], float)
+
+
+def test_training_preflight_writes_gate_a_pass_artifact(fixture_match_id, tmp_path):
+    import json as _json
+    from torch.utils.data import DataLoader
+
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    from model.plan_b_model import PlanBModel
+
+    idx = build_puuid_index([fixture_match_id, fixture_match_id])
+    ds = MatchDataset([fixture_match_id, fixture_match_id], puuid_index=idx)
+    loader = DataLoader(
+        ds,
+        batch_sampler=BucketedBatchSampler([1, 1], batch_size=2, shuffle=False, bucket_size_multiplier=1),
+        collate_fn=collate_games,
+        num_workers=0,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = PlanBModel(max_puuids=len(idx) + 1).to(device)
+
+    artifact = tmp_path / "runtime_preflight.json"
+    metrics = run_training_preflight(
+        model,
+        loader,
+        device,
+        epochs=30,
+        use_amp=(device.type == "cuda"),
+        sample_batches=1,
+        timed_batches=1,
+        min_token_efficiency=0.0,
+        min_anchor_efficiency=0.0,
+        min_recur_efficiency=0.0,
+        max_projected_epoch_minutes=1e9,
+        max_projected_earlystop_hours=1e9,
+        sample_cache=ds.materialized_sample_cache,
+        artifact_path=str(artifact),
+    )
+
+    assert metrics["gate_a_pass"] is True
+    payload = _json.loads(artifact.read_text())
+    assert payload["gate_a_pass"] is True
+    assert payload["projected_early_stop_hours"] > 0.0
+    assert payload["cache_hit_rate"] == 0.0  # cache disabled by default

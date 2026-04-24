@@ -1,0 +1,46 @@
+{
+  "projected_early_stop_hours": 11.034003621929905,
+  "cache_hit_rate": 0.0,
+  "gate_a_pass": true,
+  "details": {
+    "token_eff": 0.9554996608875379,
+    "anchor_eff": 0.9451864919354839,
+    "recur_eff": 0.8406909219518122,
+    "base_step_seconds": 0.37648453184956454,
+    "rollout_step_seconds": 0.6466241302558047,
+    "rollout_step_fraction": 0.21428571428571427,
+    "step_seconds": 0.4343715886509017,
+    "projected_epoch_minutes": 94.57717390225633,
+    "projected_earlystop_hours": 11.034003621929905,
+    "cache_hit_rate": 0.0,
+    "gate_a_pass": true,
+    "failures": [],
+    "thresholds": {
+      "min_token_efficiency": 0.8,
+      "min_anchor_efficiency": 0.85,
+      "min_recur_efficiency": 0.7,
+      "max_projected_epoch_minutes": 180.0,
+      "max_projected_earlystop_hours": 24.0
+    },
+    "epochs": 30,
+    "steps_per_epoch": 13061,
+    "cache_stats": {
+      "mode": "readwrite",
+      "version": "v1",
+      "hits": 0,
+      "misses": 0,
+      "writes": 0,
+      "materialized_files_on_disk": 508,
+      "materialized_fraction": 0.009723604624454483
+    }
+  },
+  "cache_stats": {
+    "mode": "readwrite",
+    "version": "v1",
+    "hits": 0,
+    "misses": 0,
+    "writes": 0,
+    "materialized_files_on_disk": 508,
+    "materialized_fraction": 0.009723604624454483
+  }
+}

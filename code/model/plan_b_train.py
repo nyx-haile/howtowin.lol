@@ -1,4 +1,5 @@
 import inspect
+import json
 import math
 import multiprocessing as mp
 import os
@@ -848,6 +849,9 @@ def run_training_preflight(
     min_recur_efficiency: float = PREFLIGHT_MIN_RECUR_SLOT_EFFICIENCY,
     max_projected_epoch_minutes: float = PREFLIGHT_MAX_PROJECTED_EPOCH_MINUTES,
     max_projected_earlystop_hours: float = PREFLIGHT_MAX_PROJECTED_EARLYSTOP_HOURS,
+    strict: bool = True,
+    sample_cache=None,
+    artifact_path: str | None = None,
 ):
     sampler = getattr(loader, "batch_sampler", None)
     sampler_epoch = getattr(sampler, "_epoch", None)
@@ -895,6 +899,21 @@ def run_training_preflight(
         if sampler_epoch is not None:
             sampler._epoch = sampler_epoch
 
+    cache_stats = sample_cache.stats() if sample_cache is not None else None
+    cache_hit_rate = _cache_hit_rate(cache_stats)
+    materialized_count = (
+        sample_cache.materialized_count() if sample_cache is not None and sample_cache.enabled else 0
+    )
+    corpus_size = len(getattr(loader, "dataset", []) or [])
+    materialized_fraction = (materialized_count / corpus_size) if corpus_size else 0.0
+    if cache_stats is not None:
+        cache_stats = {
+            **cache_stats,
+            "materialized_files_on_disk": materialized_count,
+            "corpus_size": corpus_size,
+            "materialized_fraction": materialized_fraction,
+        }
+
     print(
         "[preflight/e2e] "
         f"token_eff={mean_token_eff:.3f}  "
@@ -909,7 +928,12 @@ def run_training_preflight(
         + f"rollout_frac={rollout_fraction:.3f}  "
         f"step={est_step_seconds:.2f}s  "
         f"epoch≈{projected_epoch_minutes:.1f}m  "
-        f"earlystop≈{projected_earlystop_hours:.1f}h",
+        f"earlystop≈{projected_earlystop_hours:.1f}h  "
+        f"cache_hit_rate={cache_hit_rate:.3f}"
+        + (
+            f" (hits={cache_stats['hits']} misses={cache_stats['misses']} writes={cache_stats['writes']} mode={cache_stats['mode']})"
+            if cache_stats is not None else ""
+        ),
         flush=True,
     )
 
@@ -935,12 +959,8 @@ def run_training_preflight(
             f"projected early-stop time {projected_earlystop_hours:.1f}h > {max_projected_earlystop_hours:.1f}h"
         )
 
-    if failures:
-        raise RuntimeError(
-            "training preflight rejected this run: " + "; ".join(failures)
-        )
-
-    return {
+    gate_a_pass = not failures
+    metrics = {
         "token_eff": mean_token_eff,
         "anchor_eff": mean_anchor_eff,
         "recur_eff": mean_recur_eff,
@@ -950,7 +970,62 @@ def run_training_preflight(
         "step_seconds": est_step_seconds,
         "projected_epoch_minutes": projected_epoch_minutes,
         "projected_earlystop_hours": projected_earlystop_hours,
+        "cache_hit_rate": cache_hit_rate,
+        "cache_stats": cache_stats,
+        "gate_a_pass": gate_a_pass,
+        "failures": failures,
+        "thresholds": {
+            "min_token_efficiency": min_token_efficiency,
+            "min_anchor_efficiency": min_anchor_efficiency,
+            "min_recur_efficiency": min_recur_efficiency,
+            "max_projected_epoch_minutes": max_projected_epoch_minutes,
+            "max_projected_earlystop_hours": max_projected_earlystop_hours,
+        },
+        "epochs": epochs,
+        "steps_per_epoch": len(loader),
     }
+
+    if artifact_path is not None:
+        write_runtime_preflight_artifact(artifact_path, metrics)
+
+    if failures and strict:
+        raise RuntimeError(
+            "training preflight rejected this run: " + "; ".join(failures)
+        )
+
+    return metrics
+
+
+def _cache_hit_rate(cache_stats) -> float:
+    if not cache_stats:
+        return 0.0
+    hits = int(cache_stats.get("hits", 0) or 0)
+    misses = int(cache_stats.get("misses", 0) or 0)
+    total = hits + misses
+    if total <= 0:
+        return 0.0
+    return hits / total
+
+
+def write_runtime_preflight_artifact(path: str, metrics: dict) -> None:
+    """Write Gate-A handoff artifact for the skill-causal plan Step 1.
+
+    Minimum schema per plan doc: projected_early_stop_hours, cache_hit_rate, gate_a_pass.
+    Additional fields from `metrics` are included verbatim for human inspection.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    payload = {
+        "projected_early_stop_hours": float(metrics.get("projected_earlystop_hours", 0.0) or 0.0),
+        "cache_hit_rate": float(metrics.get("cache_hit_rate", 0.0) or 0.0),
+        "gate_a_pass": bool(metrics.get("gate_a_pass", False)),
+        "details": {k: v for k, v in metrics.items() if k != "cache_stats"},
+        "cache_stats": metrics.get("cache_stats"),
+    }
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    os.replace(tmp, path)
+    print(f"[preflight] wrote {path}", flush=True)
 
 
 def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
@@ -964,6 +1039,15 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       loader_order: str = DEFAULT_LOADER_ORDER,
                       train_cache_size: int | None = None,
                       run_preflight: bool = True,
+                      preflight_only: bool = False,
+                      preflight_strict: bool = True,
+                      preflight_artifact_path: str | None = None,
+                      preflight_max_epoch_minutes: float = PREFLIGHT_MAX_PROJECTED_EPOCH_MINUTES,
+                      preflight_max_earlystop_hours: float = PREFLIGHT_MAX_PROJECTED_EARLYSTOP_HOURS,
+                      materialized_cache_dir: str | None = None,
+                      materialized_cache_mode: str | None = None,
+                      materialized_cache_version: str | None = None,
+                      materialized_cache_warmup: bool | None = None,
                       compile_model: bool | None = None):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
@@ -993,9 +1077,25 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         puuid_index,
         exclude_match_ids=exclude,
         cache_size=max(int(train_cache_size), 0),
+        materialized_cache_dir=materialized_cache_dir,
+        materialized_cache_mode=materialized_cache_mode,
+        materialized_cache_version=materialized_cache_version,
+        materialized_cache_warmup=materialized_cache_warmup,
     )
     val_ds = MatchDataset(val_match_ids, puuid_index, exclude_match_ids=exclude)
     cold_ds = MatchDataset(cold_match_ids, puuid_index, exclude_match_ids=exclude) if cold_match_ids else None
+
+    train_sample_cache = train_ds.materialized_sample_cache
+    if train_sample_cache.enabled:
+        print(
+            "materialized sample cache  "
+            f"mode={train_sample_cache.config.mode}  "
+            f"dir={train_sample_cache.config.cache_dir}  "
+            f"version={train_sample_cache.config.version}  "
+            f"namespace={train_sample_cache.config.namespace}  "
+            f"warmup={train_sample_cache.config.warmup}",
+            flush=True,
+        )
 
     torch.backends.cudnn.benchmark = False
     if device.type == "cuda" and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
@@ -1083,7 +1183,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
         )
     n_train_batches = len(loader)
 
-    if run_preflight:
+    if run_preflight or preflight_only:
         run_training_preflight(
             model,
             loader,
@@ -1091,7 +1191,21 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
             epochs=epochs,
             use_amp=use_amp,
             amp_dtype=amp_dtype,
+            max_projected_epoch_minutes=preflight_max_epoch_minutes,
+            max_projected_earlystop_hours=preflight_max_earlystop_hours,
+            strict=preflight_strict and not preflight_only,
+            sample_cache=train_sample_cache,
+            artifact_path=preflight_artifact_path,
         )
+
+    if preflight_only:
+        print("[preflight] preflight_only=True — skipping epochs, exiting after artifact write", flush=True)
+        return {
+            "train_loss": [],
+            "train_total_loss": [],
+            "game_cold_auc15": [],
+            "player_cold_auc15": [],
+        }
 
     for ep in range(epochs):
         model.train()

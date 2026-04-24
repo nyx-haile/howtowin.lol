@@ -232,3 +232,24 @@ class PlanBSampleCache:
             "misses": self.misses,
             "writes": self.writes,
         }
+
+    def namespace_dir(self) -> str | None:
+        if not self.config.cache_dir:
+            return None
+        return os.path.join(self.config.cache_dir, self.config.version, self.config.namespace)
+
+    def materialized_count(self) -> int:
+        """Count .pt files on disk for this cache's (version, namespace).
+
+        Used to observe hit state across DataLoader worker processes, whose
+        in-memory hit/miss counters are not visible to the parent process.
+        """
+        ns_dir = self.namespace_dir()
+        if not ns_dir or not os.path.isdir(ns_dir):
+            return 0
+        count = 0
+        with os.scandir(ns_dir) as it:
+            for entry in it:
+                if entry.is_file() and entry.name.endswith(".pt"):
+                    count += 1
+        return count

@@ -91,6 +91,15 @@ def cmd_plan_b_train(args):
                       persistent_workers=args.persistent_workers,
                       loader_order=args.loader_order,
                       train_cache_size=args.train_cache_size,
+                      preflight_only=args.preflight_only,
+                      preflight_strict=args.preflight_strict,
+                      preflight_artifact_path=args.preflight_artifact,
+                      preflight_max_epoch_minutes=args.preflight_max_epoch_minutes,
+                      preflight_max_earlystop_hours=args.preflight_max_earlystop_hours,
+                      materialized_cache_dir=args.materialized_cache_dir,
+                      materialized_cache_mode=args.materialized_cache_mode,
+                      materialized_cache_version=args.materialized_cache_version,
+                      materialized_cache_warmup=args.materialized_cache_warmup,
                       checkpoint_tag="plan_b_full",
                       compile_model=args.compile_model)
 
@@ -408,6 +417,62 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         dest="compile_model",
+    )
+    p_pb_tr.add_argument(
+        "--preflight-only",
+        action="store_true",
+        dest="preflight_only",
+        help="Run preflight, write artifact, and exit before any training epoch.",
+    )
+    p_pb_tr.add_argument(
+        "--preflight-strict",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="preflight_strict",
+        help="Raise on preflight gate failure (default True). --no-preflight-strict records the failure but proceeds.",
+    )
+    p_pb_tr.add_argument(
+        "--preflight-artifact",
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "artifacts", "runtime_preflight.json"),
+        dest="preflight_artifact",
+        help="Path for Gate-A runtime preflight JSON artifact.",
+    )
+    p_pb_tr.add_argument(
+        "--preflight-max-epoch-minutes",
+        type=float,
+        default=60.0,
+        dest="preflight_max_epoch_minutes",
+    )
+    p_pb_tr.add_argument(
+        "--preflight-max-earlystop-hours",
+        type=float,
+        default=8.0,
+        dest="preflight_max_earlystop_hours",
+        help="Hard runtime budget for early-stop horizon. Raise to 24.0 for remote 51k full-corpus runs.",
+    )
+    p_pb_tr.add_argument(
+        "--materialized-cache-dir",
+        default=None,
+        dest="materialized_cache_dir",
+        help="Directory for on-disk materialized Plan B training samples.",
+    )
+    p_pb_tr.add_argument(
+        "--materialized-cache-mode",
+        choices=("off", "readonly", "readwrite", "refresh"),
+        default=None,
+        dest="materialized_cache_mode",
+    )
+    p_pb_tr.add_argument(
+        "--materialized-cache-version",
+        default=None,
+        dest="materialized_cache_version",
+    )
+    p_pb_tr.add_argument(
+        "--materialized-cache-warmup",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="materialized_cache_warmup",
+        help="Pre-materialize samples before the first loader epoch.",
     )
     sub.add_parser("plan-b-eval")
 
