@@ -13,7 +13,7 @@ from parser import parser
 from db import get_conn
 
 IDLE_TIMEOUT_S = 15
-MAX_WALL_S = 4800
+MAX_WALL_S = int(os.environ.get("HOWL_QUEUE_MAX_WALL_S", 28800))  # default 8h; grow_games manages termination on target
 MATCH_COUNT = 100
 MON_INTERVAL_S = 15
 

@@ -13,9 +13,15 @@ def _resolve_db_path(db_path=None):
 
 
 def get_conn(db_path=None):
-    conn = sqlite3.connect(_resolve_db_path(db_path))
+    conn = sqlite3.connect(_resolve_db_path(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")      # WAL-safe, skip redundant fsyncs
+    conn.execute("PRAGMA busy_timeout=30000")      # 30s wait instead of locking error
+    conn.execute("PRAGMA cache_size=-65536")       # 64MB page cache per connection
+    conn.execute("PRAGMA temp_store=MEMORY")       # keep temp b-trees in RAM
+    conn.execute("PRAGMA mmap_size=8589934592")    # 8GB memory-map window
+    conn.execute("PRAGMA wal_autocheckpoint=4000") # 4000 pages (~16MB) between checkpoints
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
