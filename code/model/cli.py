@@ -143,6 +143,34 @@ def cmd_plan_b_eval(args):
     print(f"  AUC @15 = {auc:.3f}  (target: <= 0.55)")
 
 
+def cmd_diagnose_rank(args):
+    """Step 2 / Gate B: rank-use diagnostics.
+
+    Produces ``artifacts/rank_diagnosis.json`` describing whether rank is
+    under-used or over-leaked in the current Plan B model.
+    """
+    from model.rank_diagnostics import run_gate_b_diagnosis
+
+    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    if args.artifact_path:
+        artifact_path = args.artifact_path
+    else:
+        artifact_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "artifacts", "rank_diagnosis.json",
+        )
+    run_gate_b_diagnosis(
+        checkpoint_path=ckpt_path,
+        split=args.split,
+        sample_games=args.sample_games,
+        swap_sample=args.swap_sample,
+        max_anchors_per_layer=args.max_anchors_per_layer,
+        artifact_path=artifact_path,
+        device=args.device,
+        band_stratified=args.band_stratified,
+        per_band_cap=args.per_band_cap,
+    )
+
+
 def _checkpoint_sha_short(path: str) -> str:
     import hashlib
     h = hashlib.sha256()
@@ -490,6 +518,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_ls.add_argument("--k", type=int, default=64)
     p_ls.add_argument("--index-path", default=None, dest="index_path")
     p_ls.add_argument("--ckpt-path", default=None, dest="ckpt_path")
+
+    p_dr = sub.add_parser(
+        "diagnose-rank",
+        help="Step 2 / Gate B: shallow rank-band probes + swap/ablation + collapse monitors",
+    )
+    p_dr.add_argument("--checkpoint", default=None, dest="checkpoint")
+    p_dr.add_argument("--split", default="holdout", choices=["holdout", "cold", "train"])
+    p_dr.add_argument("--sample-games", type=int, default=500, dest="sample_games")
+    p_dr.add_argument("--swap-sample", type=int, default=500, dest="swap_sample")
+    p_dr.add_argument("--max-anchors-per-layer", type=int, default=30000, dest="max_anchors_per_layer")
+    p_dr.add_argument(
+        "--artifact-path", default=None, dest="artifact_path",
+        help="Output JSON path (defaults to <repo>/artifacts/rank_diagnosis.json)",
+    )
+    p_dr.add_argument("--device", default=None)
+    p_dr.add_argument(
+        "--band-stratified",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="band_stratified",
+        help="Sample games balanced across coarse rank bands (default: on).",
+    )
+    p_dr.add_argument(
+        "--per-band-cap", type=int, default=250, dest="per_band_cap",
+        help="Per-band cap when --band-stratified is on.",
+    )
     return parser
 
 
@@ -518,6 +572,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_retrieval_eval(args)
     elif args.cmd == "lesson":
         cmd_lesson(args)
+    elif args.cmd == "diagnose-rank":
+        cmd_diagnose_rank(args)
 
 
 if __name__ == "__main__":
