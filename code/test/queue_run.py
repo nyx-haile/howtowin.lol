@@ -41,7 +41,7 @@ def drain_players(route, stop_flag):
         a.sadd('player_processing', a.player)
         t0 = time.time()
         try:
-            a.handle_player(match_count=MATCH_COUNT, skip_rank=True, route=route)
+            a.handle_player(match_count=MATCH_COUNT, skip_rank=False, route=route)
             print(f'[player/{route}] done {a.player[:20]} in {time.time()-t0:.1f}s', flush=True)
         except Exception:
             print(f'[player/{route}] handle_player error after {time.time()-t0:.1f}s', flush=True)
