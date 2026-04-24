@@ -271,6 +271,31 @@ class agent(Redis):
             return response.json()
         return None
 
+    def get_master_league(self, queue='RANKED_SOLO_5x5', region='na1'):
+        endpoint = "LEAGUEV4"
+        route = route_for_platform(region)
+        url = f"https://{region}.api.riotgames.com/lol/league/v4/masterleagues/by-queue/{queue}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint, route=route)
+        if response.status_code == 200:
+            return response.json()
+        return None
+
+    def get_league_exp_entries(self, tier, division, queue='RANKED_SOLO_5x5',
+                               page=1, region='na1'):
+        """league-exp-v4 paginated entries for tiers IRON..DIAMOND.
+        Returns a list of entry dicts (with `puuid`) — NOT a league doc.
+        """
+        endpoint = "LEAGUEEXPV4"
+        route = route_for_platform(region)
+        url = (f"https://{region}.api.riotgames.com/lol/league-exp/v4/entries/"
+               f"{queue}/{tier}/{division}?page={page}")
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint, route=route)
+        if response.status_code == 200:
+            return response.json() or []
+        return []
+
     def get_summoner_by_id(self, summoner_id, region='na1'):
         endpoint = "SUMMONERV4"
         route = route_for_platform(region)

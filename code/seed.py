@@ -153,6 +153,157 @@ def seed_top_players(per_tier=50, regions=None, include_grandmaster=True, refres
     print(f"Seeded {count} players total")
 
 
+TIER_DIVISIONS = ["I", "II", "III", "IV"]
+LADDER_TIERS = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM",
+                "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"]
+
+
+def _fetch_apex_entries(method_name, tier, regions):
+    """Call challenger/grandmaster/master endpoint across regions, flatten."""
+    out = []
+    seed = agent.connect()
+    fetch_fn = getattr(seed, method_name)
+    for region in _normalize_regions(regions):
+        try:
+            league = fetch_fn(region=region)
+        except requests.exceptions.ConnectionError as e:
+            print(f"Skipping {tier} for {region}: {e}", flush=True)
+            continue
+        if not league:
+            continue
+        for entry in league.get("entries", []):
+            if entry.get("puuid"):
+                out.append({
+                    "puuid": entry["puuid"],
+                    "tier": tier,
+                    "division": entry.get("rank", "I"),
+                    "lp": int(entry.get("leaguePoints", 0) or 0),
+                    "region": region,
+                })
+        print(f"  {tier:<12} {region:<5} entries={len(league.get('entries', []))}", flush=True)
+    return out
+
+
+def _fetch_ladder_entries(tier, regions, pages_per_division=1):
+    """league-exp-v4 entries for IRON..DIAMOND across all four divisions."""
+    out = []
+    seed = agent.connect()
+    for region in _normalize_regions(regions):
+        for div in TIER_DIVISIONS:
+            for page in range(1, pages_per_division + 1):
+                try:
+                    entries = seed.get_league_exp_entries(
+                        tier, div, page=page, region=region
+                    )
+                except requests.exceptions.ConnectionError as e:
+                    print(f"Skipping {tier} {div} {region}: {e}", flush=True)
+                    entries = []
+                if not entries:
+                    break
+                kept = 0
+                for entry in entries:
+                    if entry.get("puuid"):
+                        out.append({
+                            "puuid": entry["puuid"],
+                            "tier": tier,
+                            "division": entry.get("rank", div),
+                            "lp": int(entry.get("leaguePoints", 0) or 0),
+                            "region": region,
+                        })
+                        kept += 1
+                print(f"  {tier:<12} {region:<5} {div} p{page} entries={kept}",
+                      flush=True)
+    return out
+
+
+def seed_rank_diverse(per_tier_cap=2500, regions=None, refresh_cache=False,
+                     pages_per_division=1):
+    """Seed player_queue with even distribution across all 10 ranked tiers.
+    For MASTER/GM/CHALL uses league-v4 apex endpoints; for IRON..DIAMOND
+    uses league-exp-v4 paginated. Caps per tier after fetch so tiers with
+    more raw entries get downsampled; tiers with fewer (apex) get all.
+    """
+    init_db()
+    conn = get_conn()
+    seed = agent.connect()
+
+    cache_path = os.path.join(os.path.dirname(__file__), '..', 'data',
+                              'seed_cache_diverse.json')
+    cache_valid = (
+        not refresh_cache
+        and regions is None
+        and os.path.exists(cache_path)
+        and (time.time() - os.path.getmtime(cache_path)) < SEED_CACHE_MAX_AGE_S
+    )
+    if cache_valid:
+        with open(cache_path) as f:
+            by_tier = json.load(f)
+        print(f"Using diverse seed cache: "
+              f"{sum(len(v) for v in by_tier.values())} players", flush=True)
+    else:
+        print("Fetching rank-diverse seed from Riot API...", flush=True)
+        by_tier: dict[str, list[dict]] = {}
+        by_tier["CHALLENGER"] = _fetch_apex_entries(
+            "get_challenger_league", "CHALLENGER", regions)
+        by_tier["GRANDMASTER"] = _fetch_apex_entries(
+            "get_grandmaster_league", "GRANDMASTER", regions)
+        by_tier["MASTER"] = _fetch_apex_entries(
+            "get_master_league", "MASTER", regions)
+        for tier in ["DIAMOND", "EMERALD", "PLATINUM", "GOLD", "SILVER",
+                     "BRONZE", "IRON"]:
+            by_tier[tier] = _fetch_ladder_entries(tier, regions,
+                                                   pages_per_division)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, 'w') as f:
+            json.dump(by_tier, f)
+        print(f"Cached diverse seed to {cache_path}", flush=True)
+
+    print("\nCap to per-tier target:", flush=True)
+    for tier in LADDER_TIERS:
+        raw = by_tier.get(tier, [])
+        if len(raw) > per_tier_cap:
+            # SHA1-deterministic subsample for reproducibility.
+            import hashlib
+            raw = sorted(raw, key=lambda e: hashlib.sha1(
+                e["puuid"].encode()).hexdigest())[:per_tier_cap]
+        by_tier[tier] = raw
+        print(f"  {tier:<12} kept={len(raw)}", flush=True)
+
+    count = 0
+    reseeded = 0
+    skipped_cooldown = 0
+    now = time.time()
+    for tier in LADDER_TIERS:
+        for entry in by_tier.get(tier, []):
+            puuid = entry["puuid"]
+            insert_player(conn, puuid, None, entry["tier"], entry["division"],
+                          entry["lp"])
+            if seed.sismember("player_processing", puuid):
+                count += 1
+                continue
+            last_ts_raw = seed.hget("player_last_reseed", puuid)
+            if last_ts_raw is not None:
+                try:
+                    last_ts = float(last_ts_raw)
+                except (TypeError, ValueError):
+                    last_ts = 0.0
+                if now - last_ts < RESEED_COOLDOWN_S:
+                    skipped_cooldown += 1
+                    count += 1
+                    continue
+            route = route_for_platform(entry["region"])
+            seed.zincrby(f"player_queue:{route}",
+                        _tier_priority(entry["tier"], entry["lp"]), puuid)
+            seed.hset("player_region", puuid, route)
+            seed.hset("player_last_reseed", puuid, now)
+            reseeded += 1
+            count += 1
+    conn.commit()
+    conn.close()
+    print(f"\nRank-diverse seed: queued={reseeded} "
+          f"skipped_cooldown={skipped_cooldown} total={count}", flush=True)
+
+
 def seed_single(game_name, tag_line):
     init_db()
     seed = agent.connect()
