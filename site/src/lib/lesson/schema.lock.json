@@ -1,0 +1,123 @@
+{
+  "dataclasses": [
+    {
+      "fields": [
+        {
+          "name": "cohort_entropy",
+          "type": {
+            "kind": "primitive",
+            "name": "float"
+          }
+        },
+        {
+          "name": "cohort_match_ids",
+          "type": {
+            "kind": "list",
+            "of": {
+              "kind": "primitive",
+              "name": "str"
+            }
+          }
+        },
+        {
+          "name": "cohort_size",
+          "type": {
+            "kind": "primitive",
+            "name": "int"
+          }
+        },
+        {
+          "name": "cohort_winrate",
+          "type": {
+            "kind": "primitive",
+            "name": "float"
+          }
+        },
+        {
+          "name": "minute",
+          "type": {
+            "kind": "primitive",
+            "name": "int"
+          }
+        },
+        {
+          "name": "polarity",
+          "type": {
+            "kind": "primitive",
+            "name": "str"
+          }
+        }
+      ],
+      "name": "AnchorCandidate"
+    },
+    {
+      "fields": [
+        {
+          "name": "checkpoint_sha",
+          "type": {
+            "kind": "primitive",
+            "name": "str"
+          }
+        },
+        {
+          "name": "index_checkpoint_sha",
+          "type": {
+            "kind": "primitive",
+            "name": "str"
+          }
+        },
+        {
+          "name": "match_id",
+          "type": {
+            "kind": "primitive",
+            "name": "str"
+          }
+        },
+        {
+          "name": "mistake_anchor",
+          "type": {
+            "kind": "optional",
+            "of": {
+              "kind": "primitive",
+              "name": "AnchorCandidate"
+            }
+          }
+        },
+        {
+          "name": "n_mid_anchors",
+          "type": {
+            "kind": "primitive",
+            "name": "int"
+          }
+        },
+        {
+          "name": "player_won",
+          "type": {
+            "kind": "primitive",
+            "name": "bool"
+          }
+        },
+        {
+          "name": "strength_anchor",
+          "type": {
+            "kind": "optional",
+            "of": {
+              "kind": "primitive",
+              "name": "AnchorCandidate"
+            }
+          }
+        },
+        {
+          "name": "team",
+          "type": {
+            "kind": "primitive",
+            "name": "str"
+          }
+        }
+      ],
+      "name": "LessonResult"
+    }
+  ],
+  "schemaVersion": 1,
+  "source": "code/model/lesson.py"
+}
