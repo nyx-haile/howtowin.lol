@@ -1,8 +1,21 @@
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from fetch import agent, route_for_match
 from db import get_conn, init_db, insert_game, insert_frame, insert_player, insert_event
 from raw_db import get_raw_conn, init_raw_db, insert_raw_match
+
+# Live-patch gate: if HOWL_LIVE_PATCH is set (e.g. "16.8"), matches whose
+# gameVersion major.minor differs are dropped before any DB write.
+LIVE_PATCH = os.environ.get("HOWL_LIVE_PATCH", "").strip() or None
+
+
+def _patch_of(game_version: str) -> str:
+    """Return 'major.minor' from a Riot gameVersion string like '16.8.842.1234'."""
+    if not game_version:
+        return ""
+    parts = game_version.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else game_version
 
 ROLE_MAP = {
     'TOP': 'TOP', 'JUNGLE': 'JGL', 'MIDDLE': 'MID',
@@ -47,6 +60,16 @@ class parser(agent):
 
         match_id = self.match_data['metadata']['matchId']
         info = self.match_data['info']
+
+        # Drop off-patch matches before any DB write (timeline + frames/events
+        # are the bulk cost). Players already created by seed crawl stay put;
+        # only this match's rows are skipped.
+        if LIVE_PATCH:
+            patch = _patch_of(info.get('gameVersion', ''))
+            if patch != LIVE_PATCH:
+                self.sadd('match_skipped_patch', match_id)
+                self.srem('match_processing', match_id)
+                return
 
         raw_conn = get_raw_conn()
         insert_raw_match(raw_conn, match_id, self.match_data, self.match_timeline)

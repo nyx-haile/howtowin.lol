@@ -1,4 +1,5 @@
 #Helper functions to fetch data from the Riot Games API
+import os
 import threading
 import sqlite3
 import requests
@@ -10,6 +11,16 @@ import time
 import random
 from concurrent.futures import ThreadPoolExecutor
 from db import get_conn, insert_player
+
+# Live-patch gate (handle_player skips stale puuids whose newest match is off-patch)
+LIVE_PATCH = os.environ.get("HOWL_LIVE_PATCH", "").strip() or None
+
+
+def _patch_of(game_version: str) -> str:
+    if not game_version:
+        return ""
+    parts = game_version.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else game_version
 
 # Riot regional routing — rate limits are independent per route.
 PLATFORM_TO_ROUTE = {
@@ -94,6 +105,23 @@ class agent(Redis):
         matches = self.get_matches_by_puuid(self.player, count=match_count, route=player_route)
         self.set("log", f"Player {self.player} has {len(matches)} matches")
 
+        # Stale-player skip: peek at the newest match's gameVersion. If off-patch,
+        # don't queue any of this player's matches. Saves up to match_count-1
+        # downstream match-v5 + timeline calls per stale puuid. 1 extra match-v5
+        # here, but it's amortised against the (often 100) it replaces.
+        if LIVE_PATCH and matches:
+            try:
+                head = self.get_match_by_id(matches[0])
+                head_patch = _patch_of((head or {}).get("info", {}).get("gameVersion", ""))
+                if head_patch != LIVE_PATCH:
+                    self.srem("player_processing", self.player)
+                    self.sadd("player_handled", self.player)
+                    self.sadd("player_skipped_stale", self.player)
+                    return
+            except AssertionError:
+                # transient API error — fall through and let normal flow handle it
+                pass
+
         rank_tier = None
         rank_division = None
         rank_lp = None
@@ -106,19 +134,21 @@ class agent(Redis):
                     platform = first_match.split("_", 1)[0].lower()
 
             player_data = self.get_account_by_puuid(self.player, route=player_route)
-            summoner = self.get_summoner_by_puuid(self.player, region=platform)
-            if summoner and summoner.get("id"):
-                entries = self.get_league_entries_by_summoner(summoner["id"], region=platform)
-                if entries:
-                    solo = [e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"]
-                    if solo:
-                        top = max(
-                            solo,
-                            key=lambda e: (self._tier_order(e.get("tier")), int(e.get("leaguePoints", 0) or 0)),
-                        )
-                        rank_tier = top.get("tier")
-                        rank_division = top.get("rank")
-                        rank_lp = int(top.get("leaguePoints", 0) or 0)
+            # league-v4/entries/by-puuid is the modern direct path; summoner-v4 no
+            # longer returns `id`. Returns None on 400 decryption mismatch — but
+            # during seed crawl we assume match's platform == puuid's home, so
+            # single attempt is fine here (backfill does platform fallback).
+            entries = self.get_league_entries_by_puuid(self.player, region=platform)
+            if entries:
+                solo = [e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"]
+                if solo:
+                    top = max(
+                        solo,
+                        key=lambda e: (self._tier_order(e.get("tier")), int(e.get("leaguePoints", 0) or 0)),
+                    )
+                    rank_tier = top.get("tier")
+                    rank_division = top.get("rank")
+                    rank_lp = int(top.get("leaguePoints", 0) or 0)
         else:
             player_data = None
 
@@ -325,6 +355,23 @@ class agent(Redis):
         if response.status_code == 200:
             return response.json()
         return None
+
+    def get_league_entries_by_puuid(self, puuid, region='na1'):
+        """league-v4/entries/by-puuid — returns league entries directly.
+        Returns 400 "Exception decrypting" if puuid's home platform differs.
+        Caller should iterate platforms on decryption failure.
+        """
+        endpoint = "LEAGUEV4"
+        route = route_for_platform(region)
+        url = f"https://{region}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+        headers = {"X-Riot-Token": self.api_key}
+        response = self.request(url, headers=headers, endpoint=endpoint, route=route)
+        if response.status_code == 200:
+            return response.json() or []
+        if response.status_code == 400:
+            # decryption error = wrong region; signal for caller to retry
+            return None
+        return []
 
     def _tier_order(self, tier):
         order = {

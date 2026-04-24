@@ -18,13 +18,21 @@ import time
 import traceback
 from collections import defaultdict
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fetch import agent, route_for_platform
+from fetch import agent, route_for_platform, PLATFORM_TO_ROUTE
 from db import get_conn
 
 
 ROUTES = ["americas", "europe", "asia", "sea"]
+
+# Platforms grouped by route — fallback search order when a puuid's home
+# shard doesn't match the match_id prefix (decryption 400).
+PLATFORMS_BY_ROUTE: dict[str, list[str]] = {}
+for _plat, _route in PLATFORM_TO_ROUTE.items():
+    PLATFORMS_BY_ROUTE.setdefault(_route, []).append(_plat)
 
 
 def _pick_solo_entry(entries):
@@ -38,16 +46,37 @@ def _pick_solo_entry(entries):
 
 
 def _fetch_rank_for_puuid(a: "agent", puuid: str, platform: str):
-    """Return (tier, division, lp) or (None, None, None) if no rank / API failure."""
-    try:
-        summoner = a.get_summoner_by_puuid(puuid, region=platform)
-    except AssertionError:
-        return None, None, None
-    if not summoner or not summoner.get("id"):
-        return None, None, None
-    try:
-        entries = a.get_league_entries_by_summoner(summoner["id"], region=platform)
-    except AssertionError:
+    """Return (tier, division, lp) or (None, None, None).
+
+    Uses league-v4/entries/by-puuid (direct path; summoner-v4 no longer
+    returns `id`). Returns None on 400 'Exception decrypting' — caller
+    retries on other platforms. Returns [] for unranked puuids on the
+    correct shard.
+    """
+    def _try(p):
+        try:
+            return a.get_league_entries_by_puuid(puuid, region=p)
+        except (AssertionError, requests.exceptions.RequestException):
+            return None
+
+    # Try the guessed platform first (from match_id prefix).
+    tried = {platform}
+    entries = _try(platform)
+
+    # On decryption failure, only iterate same-route platforms (cheap fallback
+    # for smurfs who played via a nearby shard). Cross-region fallback is too
+    # expensive at 51k-puuid scale given most stale failures are genuinely
+    # dead/rotated accounts — not worth 16x the API budget.
+    if entries is None:
+        route = route_for_platform(platform)
+        same_route = [p for p in PLATFORMS_BY_ROUTE.get(route, []) if p not in tried]
+        for p in same_route:
+            tried.add(p)
+            entries = _try(p)
+            if entries is not None:
+                break
+
+    if not entries:
         return None, None, None
     solo = _pick_solo_entry(entries)
     if not solo:
