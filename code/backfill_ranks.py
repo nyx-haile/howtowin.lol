@@ -59,16 +59,18 @@ def _collect_unknown_puuids():
     """Map route -> list of (puuid, platform). Skip puuids with no matches."""
     conn = get_conn()
     try:
+        # Per-row LIMIT 1 subquery uses idx_frames_puuid directly; avoids
+        # a full GROUP BY over the frames table (>1M rows under grow_games).
         rows = conn.execute(
             """
-            SELECT p.puuid, MIN(f.match_id) AS any_match
+            SELECT p.puuid,
+                   (SELECT f.match_id FROM frames f
+                     WHERE f.puuid = p.puuid LIMIT 1) AS any_match
             FROM players p
-            LEFT JOIN frames f ON f.puuid = p.puuid
             WHERE p.rank_tier IS NULL
-            GROUP BY p.puuid
-            HAVING any_match IS NOT NULL
             """
         ).fetchall()
+        rows = [r for r in rows if r["any_match"]]
     finally:
         conn.close()
 
@@ -141,10 +143,10 @@ def main():
     print("Collecting UNKNOWN puuids...", flush=True)
     per_route = _collect_unknown_puuids()
     total = sum(len(v) for v in per_route.values())
-    print(f"Found {total} puuids to backfill:")
+    print(f"Found {total} puuids to backfill:", flush=True)
     for r in ROUTES:
         n = len(per_route.get(r, []))
-        print(f"  {r}: {n}")
+        print(f"  {r}: {n}", flush=True)
 
     counters: dict[str, tuple[int, int]] = {}
     lock = threading.Lock()
