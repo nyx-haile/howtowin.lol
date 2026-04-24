@@ -360,6 +360,8 @@ class agent(Redis):
         """league-v4/entries/by-puuid — returns league entries directly.
         Returns 400 "Exception decrypting" if puuid's home platform differs.
         Caller should iterate platforms on decryption failure.
+        Raises on 429/5xx so caller can distinguish transient failure from
+        unranked (vs silently returning []).
         """
         endpoint = "LEAGUEV4"
         route = route_for_platform(region)
@@ -371,7 +373,10 @@ class agent(Redis):
         if response.status_code == 400:
             # decryption error = wrong region; signal for caller to retry
             return None
-        return []
+        if response.status_code == 404:
+            return []
+        # 429 (exhausted retries) or 5xx — signal transient failure
+        raise RuntimeError(f"league-v4 transient {response.status_code} on {region}")
 
     def _tier_order(self, tier):
         order = {

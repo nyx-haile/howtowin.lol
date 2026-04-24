@@ -56,7 +56,7 @@ def _fetch_rank_for_puuid(a: "agent", puuid: str, platform: str):
     def _try(p):
         try:
             return a.get_league_entries_by_puuid(puuid, region=p)
-        except (AssertionError, requests.exceptions.RequestException):
+        except (AssertionError, requests.exceptions.RequestException, RuntimeError):
             return None
 
     # Try the guessed platform first (from match_id prefix).
