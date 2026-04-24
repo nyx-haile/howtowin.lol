@@ -58,9 +58,8 @@ def cmd_train(args):
 
 
 def cmd_cold_build(args):
-    from model.cold_holdout import save_player_cold_holdout
-    puuids, match_ids = save_player_cold_holdout()
-    print(f"cold puuids: {len(puuids)}  cold matches: {len(match_ids)}")
+    from model.cold_holdout import rebuild_all_splits
+    rebuild_all_splits()
 
 
 def cmd_plan_b_shakedown(args):

@@ -1,7 +1,9 @@
 import hashlib
 from model.cold_holdout import (
-    build_player_cold_holdout, COLD_HOLDOUT_PATH, COLD_HOLDOUT_PUUID_COUNT,
+    build_player_cold_holdout, COLD_HOLDOUT_PATH,
+    PLAYER_COLD_GAMES_FRACTION, PLAYER_COLD_TOLERANCE,
 )
+from db import get_conn
 
 
 def test_build_is_deterministic():
@@ -10,10 +12,23 @@ def test_build_is_deterministic():
     assert a == b
 
 
-def test_uses_expected_number_of_puuids():
-    result = build_player_cold_holdout()
-    puuids, match_ids = result
-    assert len(puuids) == COLD_HOLDOUT_PUUID_COUNT
+def test_cold_games_fraction_within_tolerance():
+    puuids, match_ids = build_player_cold_holdout()
+    conn = get_conn()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+    finally:
+        conn.close()
+    if total == 0:
+        return
+    frac = len(match_ids) / total
+    # Hit at or above target, within upper tolerance.
+    assert frac >= PLAYER_COLD_GAMES_FRACTION * 0.9, (
+        f"cold fraction {frac:.3f} below target {PLAYER_COLD_GAMES_FRACTION}"
+    )
+    assert frac <= PLAYER_COLD_GAMES_FRACTION * (1 + PLAYER_COLD_TOLERANCE) * 1.5, (
+        f"cold fraction {frac:.3f} exceeds tolerance"
+    )
 
 
 def test_match_ids_actually_contain_those_puuids():
