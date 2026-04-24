@@ -31,10 +31,13 @@ def test_dataset_without_exclude_matches_plan_a_behavior(fixture_match_id):
     np.testing.assert_allclose(ds_a[0]["players"].numpy(), ds_b[0]["players"].numpy())
 
 
-def test_load_split_cold_returns_cold_ids():
-    save_player_cold_holdout()  # ensure file exists
-    cold = set(load_split("cold"))
+def test_load_split_cold_returns_cold_ids(tmp_path, monkeypatch):
+    from model import cold_holdout as ch
+    tmp_file = tmp_path / "plan_b_cold_holdout.txt"
+    monkeypatch.setattr(ch, "COLD_HOLDOUT_PATH", str(tmp_file))
+    save_player_cold_holdout(path=str(tmp_file))
     _puuids, expected = build_player_cold_holdout()
+    cold = set(load_split("cold"))
     assert cold == expected
 
 

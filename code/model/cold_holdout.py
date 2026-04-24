@@ -161,12 +161,14 @@ def save_game_cold_holdout(
     return match_ids
 
 
-def load_player_cold_holdout(path: str = COLD_HOLDOUT_PATH) -> set[str]:
+def load_player_cold_holdout(path: str | None = None) -> set[str]:
+    path = path or COLD_HOLDOUT_PATH
     with open(path) as f:
         return {line.strip() for line in f if line.strip()}
 
 
-def load_game_cold_holdout(path: str = GAME_HOLDOUT_PATH) -> set[str]:
+def load_game_cold_holdout(path: str | None = None) -> set[str]:
+    path = path or GAME_HOLDOUT_PATH
     with open(path) as f:
         return {line.strip() for line in f if line.strip()}
 
