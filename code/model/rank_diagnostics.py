@@ -25,28 +25,18 @@ from torch.utils.data import DataLoader
 
 from db import get_conn
 from model.dataset import collate_games
-
-# Coarse bands — see plan's "Retrieval / rank-band contract" section.
-# Tier ordinal (RANK_TIER_ORDER in player_features.py) -> coarse band id.
-# 0 (unranked) maps to -1 and is filtered out before probe fit.
-TIER_TO_BAND: dict[int, int] = {
-    0: -1,
-    1: 0, 2: 0, 3: 0,           # Iron, Bronze, Silver
-    4: 1, 5: 1,                 # Gold, Platinum
-    6: 2, 7: 2,                 # Emerald, Diamond
-    8: 3, 9: 3, 10: 3,          # Master, Grandmaster, Challenger
-}
-BAND_NAMES = ["iron_silver", "gold_platinum", "emerald_diamond", "master_plus"]
-N_BANDS = 4
+from model.rank_band import (
+    BAND_NAMES,
+    BAND_TIER_NAMES,
+    MIN_RANKED_PLAYERS_FOR_GAME_BAND,
+    N_BANDS,
+    TIER_TO_BAND,
+    game_band as _game_band,
+    player_band as _player_band,
+    tier_to_band_tensor as _tier_to_band_tensor,
+)
 
 PROBE_LAYERS = ("player_emb", "h_t", "post_mu", "prior_mu", "retrieval_key")
-
-BAND_TIER_NAMES: dict[int, tuple[str, ...]] = {
-    0: ("IRON", "BRONZE", "SILVER"),
-    1: ("GOLD", "PLATINUM"),
-    2: ("EMERALD", "DIAMOND"),
-    3: ("MASTER", "GRANDMASTER", "CHALLENGER"),
-}
 
 
 def select_band_stratified_match_ids(
@@ -107,52 +97,6 @@ def select_band_stratified_match_ids(
         else:
             counts[BAND_NAMES[band_id]] = 0
     return sorted(picked), counts
-
-
-def _tier_to_band_tensor(tiers: torch.Tensor) -> torch.Tensor:
-    """Map tier ordinal (0..10) to coarse band id (0..3) or -1 (unranked)."""
-    lut = torch.tensor(
-        [-1, 0, 0, 0, 1, 1, 2, 2, 3, 3, 3],
-        dtype=torch.long,
-        device=tiers.device,
-    )
-    t = tiers.round().long().clamp(min=0, max=10)
-    band = lut[t]
-    band[tiers <= 0] = -1
-    return band
-
-
-MIN_RANKED_PLAYERS_FOR_GAME_BAND = 1
-
-
-def _game_band(players: torch.Tensor) -> torch.Tensor:
-    """Per-game rank band: mode of ranked players' coarse bands.
-
-    ``players``: ``(B, 10, PLAYER_FEATURE_DIM)`` — col 0 is ``rank_tier_ordinal``.
-    Returns ``(B,)`` long; value in ``{0..3}`` if at least
-    ``MIN_RANKED_PLAYERS_FOR_GAME_BAND`` players are ranked, else ``-1``.
-
-    Rationale: the 51k corpus has ~19% per-puuid rank coverage, and in this
-    corpus "unranked" usually means "rank backfill pending" rather than the
-    player being truly unranked. Matchmaking binds a lobby tightly, so even
-    one ranked player's band is a faithful proxy for the lobby's true band.
-    """
-    player_bands = _player_band(players)   # (B, 10) long, -1 for unranked
-    B = player_bands.shape[0]
-    out = torch.full((B,), -1, dtype=torch.long, device=player_bands.device)
-    for b in range(B):
-        ranked = player_bands[b][player_bands[b] >= 0]
-        if ranked.numel() < MIN_RANKED_PLAYERS_FOR_GAME_BAND:
-            continue
-        vals, counts = torch.unique(ranked, return_counts=True)
-        out[b] = vals[counts.argmax()]
-    return out
-
-
-def _player_band(players: torch.Tensor) -> torch.Tensor:
-    """Per-player band. Returns ``(B, 10)`` long, values in ``{0..3}`` or ``-1``."""
-    tiers = players[..., 0]
-    return _tier_to_band_tensor(tiers)
 
 
 def _balance_sample(

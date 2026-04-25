@@ -1,0 +1,68 @@
+{
+  "auc_at_15": 0.8489073937181508,
+  "config": {
+    "auc_minute": 15,
+    "checkpoint_path": "/home/limestone/ubuild/howtowin.lol/data/model_checkpoints/plan_b_full_best.pt",
+    "index_path": "/home/limestone/ubuild/howtowin.lol/data/retrieval/plan_b_index.pt",
+    "k": 64,
+    "min_effective_k": 32,
+    "out_of_band_penalty": 1.25,
+    "skill_min_effective_k_default": 32,
+    "skill_out_of_band_penalty_default": 1.25
+  },
+  "gate_c_pass": true,
+  "median_effective_k": 1154994.0,
+  "per_split": {
+    "game_cold": {
+      "auc_at_15": 0.8489073937181508,
+      "auc_at_15_unrestricted": 0.8488824551037902,
+      "auc_n_queries": 4736,
+      "config": {
+        "auc_minute": 15,
+        "min_effective_k": 32,
+        "out_of_band_penalty": 1.25
+      },
+      "gate_c_pass": true,
+      "k": 64,
+      "mean_effective_k": 1147715.625,
+      "mean_in_band_fraction": 0.9526529312133789,
+      "median_effective_k": 1154994.0,
+      "n_holdout_games": 4581,
+      "n_queries": 65705,
+      "skill_aware_entropy_at_64": 0.6925609707832336,
+      "unrestricted_entropy_at_64": 0.692244827747345,
+      "widening_stage_counts": {
+        "adjacent": 0,
+        "same": 65705,
+        "unrestricted": 0
+      }
+    },
+    "player_cold": {
+      "auc_at_15": 0.847014362724771,
+      "auc_at_15_unrestricted": 0.8467319175088618,
+      "auc_n_queries": 5294,
+      "config": {
+        "auc_minute": 15,
+        "min_effective_k": 32,
+        "out_of_band_penalty": 1.25
+      },
+      "gate_c_pass": true,
+      "k": 64,
+      "mean_effective_k": 1132109.25,
+      "mean_in_band_fraction": 0.9516286849975586,
+      "median_effective_k": 1154994.0,
+      "n_holdout_games": 5108,
+      "n_queries": 73295,
+      "skill_aware_entropy_at_64": 0.6940465569496155,
+      "unrestricted_entropy_at_64": 0.6938561201095581,
+      "widening_stage_counts": {
+        "adjacent": 0,
+        "same": 73295,
+        "unrestricted": 0
+      }
+    }
+  },
+  "primary_split": "game_cold",
+  "skill_aware_entropy_at_64": 0.6925609707832336,
+  "unrestricted_entropy_at_64": 0.692244827747345
+}

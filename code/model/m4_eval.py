@@ -3,14 +3,26 @@
 Builds queries from holdout splits, runs k-sweep entropy, prints
 per-minute table, runs baseline indexes, writes report. See spec
 docs/superpowers/specs/2026-04-17-m4-retrieval-check-design.md.
+
+Step 3 / Gate C additions:
+- :func:`run_skill_aware_eval` — parallel skill-aware vs unrestricted eval
+  over the holdout queries, reporting effective cohort size, widening-stage
+  distribution, entropies, and AUC@15.
+- :func:`write_retrieval_eval_artifact` — writes ``artifacts/retrieval_eval.json``.
 """
+import json
 import math
+import os
+import tempfile
+
 import torch
 from torch.utils.data import DataLoader
 
 from model.dataset import MatchDataset, collate_games
 from model.retrieval import (
-    encode_game_keys, query_index, MID_GAME_MINUTES,
+    encode_game_keys, encode_game_rank_band, query_index,
+    query_index_skill_aware, MID_GAME_MINUTES, SKILL_MIN_EFFECTIVE_K,
+    SKILL_OUT_OF_BAND_PENALTY,
 )
 
 _LOG2 = math.log(2.0)
@@ -251,3 +263,212 @@ def _build_frame_features_queries(holdout_match_ids, mid_minutes):
     if not keys_list:
         return torch.zeros(0, FRAME_BASELINE_DIM), torch.zeros(0, dtype=torch.int64)
     return torch.cat(keys_list, dim=0), torch.cat(mins_list, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# Step 3 / Gate C — skill-aware eval
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def _build_holdout_queries_with_meta(
+    model, holdout_match_ids, puuid_index, exclude_match_ids, device, mid_minutes,
+):
+    """Per-anchor queries plus per-query metadata.
+
+    Returns ``(queries_raw, query_minutes, query_bands, query_blue_win,
+    query_match_id)`` — last is a list of len Q.
+    """
+    from model.retrieval import KEY_DIM
+
+    empty = (
+        torch.zeros(0, KEY_DIM),
+        torch.zeros(0, dtype=torch.int64),
+        torch.zeros(0, dtype=torch.int64),
+        torch.zeros(0, dtype=torch.int8),
+        [],
+    )
+    if not holdout_match_ids:
+        return empty
+
+    ds = MatchDataset(holdout_match_ids, puuid_index=puuid_index,
+                      exclude_match_ids=exclude_match_ids, cache_size=1)
+    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
+
+    keys_list, mins_list, bands_list, bw_list, mid_list = [], [], [], [], []
+    mid_set = set(int(m) for m in mid_minutes)
+
+    for i, batch in enumerate(loader):
+        batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+        keys, minutes, blue_win = encode_game_keys(model, batch)
+        mask = torch.tensor([int(m.item()) in mid_set for m in minutes],
+                            dtype=torch.bool)
+        if not mask.any():
+            continue
+        q_band = encode_game_rank_band(batch)
+        n_kept = int(mask.sum().item())
+        keys_list.append(keys[mask].cpu())
+        mins_list.append(minutes[mask].cpu())
+        bands_list.append(torch.full((n_kept,), q_band, dtype=torch.int64))
+        bw_list.append(torch.full((n_kept,), int(blue_win.item()), dtype=torch.int8))
+        mid_list.extend([holdout_match_ids[i]] * n_kept)
+
+    if not keys_list:
+        return empty
+
+    return (
+        torch.cat(keys_list, dim=0),
+        torch.cat(mins_list, dim=0),
+        torch.cat(bands_list, dim=0),
+        torch.cat(bw_list, dim=0),
+        mid_list,
+    )
+
+
+def _roc_auc(scores: torch.Tensor, labels: torch.Tensor) -> float:
+    """Macro binary AUC via sklearn. Returns nan if <2 classes present."""
+    from sklearn.metrics import roc_auc_score
+    y = labels.cpu().numpy()
+    s = scores.cpu().numpy()
+    if len(set(y.tolist())) < 2:
+        return float("nan")
+    try:
+        return float(roc_auc_score(y, s))
+    except ValueError:
+        return float("nan")
+
+
+@torch.no_grad()
+def run_skill_aware_eval(
+    *,
+    model,
+    model_bundle,
+    holdout_match_ids: list[str],
+    puuid_index: dict,
+    exclude_match_ids: set[str],
+    k: int = 64,
+    device: str = "cpu",
+    query_batch_size: int = 256,
+    skill_batch_size: int = 64,
+    min_effective_k: int = SKILL_MIN_EFFECTIVE_K,
+    out_of_band_penalty: float = SKILL_OUT_OF_BAND_PENALTY,
+    auc_minute: int = 15,
+) -> dict:
+    """Dual-report eval: unrestricted vs. skill-aware retrieval on the holdout.
+
+    Returns a dict shaped for ``artifacts/retrieval_eval.json``.
+    """
+    queries_raw, q_min, q_band, q_bw, q_mid = _build_holdout_queries_with_meta(
+        model, holdout_match_ids, puuid_index, exclude_match_ids,
+        device, MID_GAME_MINUTES,
+    )
+
+    Q = int(queries_raw.shape[0])
+    out: dict = {
+        "n_queries": Q,
+        "n_holdout_games": len(holdout_match_ids),
+        "k": int(k),
+    }
+
+    if Q == 0:
+        out["gate_c_pass"] = False
+        out["median_effective_k"] = 0.0
+        out["skill_aware_entropy_at_64"] = float("nan")
+        out["unrestricted_entropy_at_64"] = float("nan")
+        out["auc_at_15"] = float("nan")
+        out["widening_stage_counts"] = {"same": 0, "adjacent": 0, "unrestricted": 0}
+        return out
+
+    # Unrestricted retrieval (classic path).
+    u_idx, _ = query_index(
+        model_bundle, queries_raw, k=k, device=device,
+        batch_size=query_batch_size,
+    )
+    u_entropy = mean_entropy_at_k(u_idx, model_bundle.row_blue_win)
+    u_cohort_winrate = model_bundle.row_blue_win[u_idx].float().mean(dim=1)
+
+    # Skill-aware retrieval.
+    s_idx, _, info = query_index_skill_aware(
+        model_bundle, queries_raw, k=k,
+        query_rank_bands=q_band.long(),
+        device=device,
+        batch_size=skill_batch_size,
+        min_effective_k=min_effective_k,
+        out_of_band_penalty=out_of_band_penalty,
+    )
+    s_entropy = mean_entropy_at_k(s_idx, model_bundle.row_blue_win)
+    s_cohort_winrate = model_bundle.row_blue_win[s_idx].float().mean(dim=1)
+
+    # AUC @ auc_minute — cohort-mean blue_win as the soft predictor,
+    # query_blue_win as the true label. We pick the anchor closest to
+    # auc_minute per *holdout game* to avoid over-counting long games.
+    auc_mask = (q_min == int(auc_minute))
+    if auc_mask.sum().item() < 2:
+        auc_unrestricted = float("nan")
+        auc_skill = float("nan")
+    else:
+        auc_unrestricted = _roc_auc(u_cohort_winrate[auc_mask], q_bw[auc_mask])
+        auc_skill = _roc_auc(s_cohort_winrate[auc_mask], q_bw[auc_mask])
+
+    # Widening-stage distribution.
+    stages = info["widening_stage_per_query"]
+    stage_counts = {
+        "same": int((stages == 0).sum().item()),
+        "adjacent": int((stages == 1).sum().item()),
+        "unrestricted": int((stages == 2).sum().item()),
+    }
+
+    # Effective cohort size reported as the SAME-band eligibility per query
+    # (rows that pass the strict in-band filter). Median is the headline gate.
+    eff_k = info["effective_k_per_query"].float()
+    median_eff_k = float(eff_k.median().item())
+    mean_eff_k = float(eff_k.mean().item())
+    in_band_frac = info["in_band_fraction_per_query"]
+    # Drop nan entries (unranked queries) before aggregating.
+    in_band_clean = in_band_frac[~torch.isnan(in_band_frac)]
+    mean_in_band = (
+        float(in_band_clean.mean().item())
+        if in_band_clean.numel() else float("nan")
+    )
+
+    gate_c_pass = bool(
+        (median_eff_k >= float(min_effective_k))
+        and (not math.isnan(auc_skill))
+        and (auc_skill >= auc_unrestricted - 0.02 if not math.isnan(auc_unrestricted) else True)
+        and (not math.isnan(s_entropy))
+        and (not math.isnan(u_entropy))
+        and (s_entropy <= u_entropy + 0.03)
+    )
+
+    out.update({
+        "gate_c_pass": gate_c_pass,
+        "median_effective_k": median_eff_k,
+        "mean_effective_k": mean_eff_k,
+        "skill_aware_entropy_at_64": float(s_entropy),
+        "unrestricted_entropy_at_64": float(u_entropy),
+        "auc_at_15": float(auc_skill),
+        "auc_at_15_unrestricted": float(auc_unrestricted),
+        "mean_in_band_fraction": mean_in_band,
+        "widening_stage_counts": stage_counts,
+        "auc_n_queries": int(auc_mask.sum().item()),
+        "config": {
+            "min_effective_k": int(min_effective_k),
+            "out_of_band_penalty": float(out_of_band_penalty),
+            "auc_minute": int(auc_minute),
+        },
+    })
+    return out
+
+
+def write_retrieval_eval_artifact(path: str, metrics: dict) -> None:
+    """Atomic JSON write for the Gate C handoff artifact."""
+    dirn = os.path.dirname(path)
+    if dirn:
+        os.makedirs(dirn, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=dirn or ".", prefix=".retrieval_eval.", suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        json.dump(metrics, tmp, indent=2, sort_keys=True)
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)

@@ -24,7 +24,8 @@ from model.dataset import (
     MatchDataset, build_puuid_index, collate_games, load_split,
 )
 from model.retrieval import (
-    encode_game_keys, query_index, load_index,
+    encode_game_keys, encode_game_rank_band, query_index,
+    query_index_skill_aware, load_index,
     DEFAULT_INDEX_PATH, MID_GAME_MINUTES,
 )
 from model.m4_eval import binary_entropy
@@ -80,7 +81,7 @@ def _load_model(ckpt_path: str, device: str):
 def _encode_mid_anchors(model, match_id: str, puuid_index: dict,
                         exclude_match_ids: set[str], device: str,
                         mid_minutes: set[int]):
-    """Encode the target game; return (keys, minutes, blue_win) for mid-game anchors only."""
+    """Encode the target game; return (keys, minutes, blue_win, game_band) for mid-game anchors only."""
     ds = MatchDataset(
         [match_id], puuid_index=puuid_index,
         exclude_match_ids=exclude_match_ids, cache_size=1,
@@ -90,10 +91,11 @@ def _encode_mid_anchors(model, match_id: str, puuid_index: dict,
         batch = {k: (v.to(device) if torch.is_tensor(v) else v)
                  for k, v in batch.items()}
         keys, minutes, blue_win = encode_game_keys(model, batch)
+        game_band = encode_game_rank_band(batch)
         mask = torch.tensor(
             [int(m.item()) in mid_minutes for m in minutes], dtype=torch.bool,
         )
-        return keys[mask].cpu(), minutes[mask].cpu(), int(blue_win.item())
+        return keys[mask].cpu(), minutes[mask].cpu(), int(blue_win.item()), int(game_band)
     raise RuntimeError(f"MatchDataset produced no sample for {match_id}")
 
 
@@ -106,11 +108,16 @@ def generate_lesson(
     ckpt_path: Optional[str] = None,
     device: Optional[str] = None,
     mid_minutes=None,
+    skill_aware: bool = False,
 ) -> LessonResult:
     """Produce mistake + strength anchor candidates for `match_id`.
 
     team: "blue" (participants 1–5) or "red" (participants 6–10).
     k: cohort size per anchor.
+    skill_aware: if True, use :func:`query_index_skill_aware` to prefer
+        same-rank-band cohort rows. Requires the index to have been built with
+        schema_version >= 2 (has ``row_rank_band``). Falls back to unrestricted
+        retrieval on legacy bundles with a one-time warning.
     """
     if team not in ("blue", "red"):
         raise ValueError(f"team must be 'blue' or 'red', got {team!r}")
@@ -132,7 +139,7 @@ def generate_lesson(
     exclude = holdout | cold | {match_id}
     puuid_index = build_puuid_index(train_ids, max_puuids=max_puuids)
 
-    keys, minutes, blue_win = _encode_mid_anchors(
+    keys, minutes, blue_win, game_band = _encode_mid_anchors(
         model, match_id, puuid_index, exclude, device, mid_set,
     )
     n_mid = int(keys.shape[0])
@@ -146,7 +153,19 @@ def generate_lesson(
             n_mid_anchors=0,
         )
 
-    cohort_idx, _ = query_index(bundle, keys, k=k, exclude_match_ids={match_id}, device=device)
+    if skill_aware and bundle.has_rank_metadata():
+        q_bands = torch.full((n_mid,), int(game_band), dtype=torch.long)
+        cohort_idx, _, _ = query_index_skill_aware(
+            bundle, keys, k=k, query_rank_bands=q_bands,
+            exclude_match_ids={match_id}, device=device,
+        )
+    else:
+        if skill_aware and not bundle.has_rank_metadata():
+            print(
+                "[lesson] skill_aware=True but bundle has no rank metadata; "
+                "falling back to unrestricted retrieval.",
+            )
+        cohort_idx, _ = query_index(bundle, keys, k=k, exclude_match_ids={match_id}, device=device)
     cohort_labels = bundle.row_blue_win[cohort_idx].float()  # (Q, k)
     cohort_winrate = cohort_labels.mean(dim=1)               # (Q,)
     entropy = binary_entropy(cohort_winrate)                 # (Q,)

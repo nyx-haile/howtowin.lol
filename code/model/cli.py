@@ -143,6 +143,122 @@ def cmd_plan_b_eval(args):
     print(f"  AUC @15 = {auc:.3f}  (target: <= 0.55)")
 
 
+def cmd_skill_retrieval_eval(args):
+    """Step 3 / Gate C: skill-aware retrieval eval.
+
+    Loads the model + current index, evaluates dual (unrestricted + skill-aware)
+    retrieval on the holdout split(s), and writes
+    ``artifacts/retrieval_eval.json``.
+    """
+    import torch as _t
+
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import (
+        DEFAULT_INDEX_PATH, SKILL_MIN_EFFECTIVE_K, SKILL_OUT_OF_BAND_PENALTY,
+        load_index,
+    )
+    from model.m4_eval import (
+        run_skill_aware_eval, write_retrieval_eval_artifact,
+    )
+
+    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    index_path = args.index_path or DEFAULT_INDEX_PATH
+
+    if args.artifact_path:
+        artifact_path = args.artifact_path
+    else:
+        artifact_path = os.path.join(
+            os.path.dirname(__file__), "..", "..",
+            "artifacts", "retrieval_eval.json",
+        )
+
+    ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
+    max_puuids = ckpt.get("max_puuids", 20000)
+
+    train = load_split("train")
+    val = load_split("holdout")
+    cold = load_split("cold")
+    exclude = set(val) | set(cold)
+    puuid_index = build_puuid_index(train, max_puuids=max_puuids)
+
+    device = args.device or ("cuda" if _t.cuda.is_available() else "cpu")
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    bundle = load_index(index_path)
+    if not bundle.has_rank_metadata():
+        raise SystemExit(
+            f"Index at {index_path} has no rank-band metadata "
+            "(schema_version < 2). Run `retrieval-build` with the current "
+            "codebase to regenerate it before skill-retrieval-eval."
+        )
+
+    split_choices = args.splits.split(",") if args.splits else ["game_cold", "player_cold"]
+    per_split: dict[str, dict] = {}
+    for label in split_choices:
+        if label == "game_cold":
+            ids = val
+        elif label == "player_cold":
+            ids = cold
+        elif label == "train":
+            ids = train
+        else:
+            raise SystemExit(f"unknown split {label!r}")
+        print(f"\n=== skill-retrieval-eval: {label} ({len(ids)} games) ===")
+        r = run_skill_aware_eval(
+            model=model, model_bundle=bundle,
+            holdout_match_ids=ids,
+            puuid_index=puuid_index, exclude_match_ids=exclude,
+            k=args.k, device=device,
+            query_batch_size=args.query_batch_size,
+            skill_batch_size=args.skill_batch_size,
+            min_effective_k=args.min_effective_k,
+            out_of_band_penalty=args.out_of_band_penalty,
+            auc_minute=args.auc_minute,
+        )
+        print(
+            "  n_queries={nq}  median_eff_k={mk:.1f}  skill_h@{k}={sh:.3f}  "
+            "unrestricted_h@{k}={uh:.3f}  auc@{am}={au:.3f}  "
+            "stages[same/adj/unres]={s}/{a}/{u}".format(
+                nq=r["n_queries"], mk=r["median_effective_k"], k=r["k"],
+                sh=r["skill_aware_entropy_at_64"], uh=r["unrestricted_entropy_at_64"],
+                am=r["config"]["auc_minute"], au=r["auc_at_15"],
+                s=r["widening_stage_counts"]["same"],
+                a=r["widening_stage_counts"]["adjacent"],
+                u=r["widening_stage_counts"]["unrestricted"],
+            )
+        )
+        per_split[label] = r
+
+    # Headline metrics are drawn from the primary split (first in splits list).
+    primary = per_split[split_choices[0]]
+    artifact = {
+        "gate_c_pass": bool(primary["gate_c_pass"]),
+        "median_effective_k": primary["median_effective_k"],
+        "skill_aware_entropy_at_64": primary["skill_aware_entropy_at_64"],
+        "unrestricted_entropy_at_64": primary["unrestricted_entropy_at_64"],
+        "auc_at_15": primary["auc_at_15"],
+        "primary_split": split_choices[0],
+        "per_split": per_split,
+        "config": {
+            "checkpoint_path": ckpt_path,
+            "index_path": index_path,
+            "k": int(args.k),
+            "min_effective_k": int(args.min_effective_k),
+            "out_of_band_penalty": float(args.out_of_band_penalty),
+            "auc_minute": int(args.auc_minute),
+            "skill_min_effective_k_default": int(SKILL_MIN_EFFECTIVE_K),
+            "skill_out_of_band_penalty_default": float(SKILL_OUT_OF_BAND_PENALTY),
+        },
+    }
+    write_retrieval_eval_artifact(artifact_path, artifact)
+    print(
+        "\n[skill-retrieval-eval] gate_c_pass="
+        f"{artifact['gate_c_pass']} artifact={artifact_path}"
+    )
+
+
 def cmd_diagnose_rank(args):
     """Step 2 / Gate B: rank-use diagnostics.
 
@@ -519,6 +635,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ls.add_argument("--index-path", default=None, dest="index_path")
     p_ls.add_argument("--ckpt-path", default=None, dest="ckpt_path")
 
+    p_sre = sub.add_parser(
+        "skill-retrieval-eval",
+        help="Step 3 / Gate C: dual-report skill-aware + unrestricted retrieval eval",
+    )
+    p_sre.add_argument("--checkpoint", default=None, dest="checkpoint")
+    p_sre.add_argument("--index-path", default=None, dest="index_path")
+    p_sre.add_argument("--artifact-path", default=None, dest="artifact_path")
+    p_sre.add_argument("--device", default=None)
+    p_sre.add_argument("--k", type=int, default=64)
+    p_sre.add_argument("--query-batch-size", type=int, default=256, dest="query_batch_size")
+    p_sre.add_argument("--skill-batch-size", type=int, default=64, dest="skill_batch_size")
+    p_sre.add_argument("--min-effective-k", type=int, default=32, dest="min_effective_k")
+    p_sre.add_argument("--out-of-band-penalty", type=float, default=1.25, dest="out_of_band_penalty")
+    p_sre.add_argument("--auc-minute", type=int, default=15, dest="auc_minute")
+    p_sre.add_argument(
+        "--splits", default="game_cold,player_cold",
+        help="Comma-separated holdout splits to evaluate (default: game_cold,player_cold).",
+    )
+
     p_dr = sub.add_parser(
         "diagnose-rank",
         help="Step 2 / Gate B: shallow rank-band probes + swap/ablation + collapse monitors",
@@ -574,6 +709,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_lesson(args)
     elif args.cmd == "diagnose-rank":
         cmd_diagnose_rank(args)
+    elif args.cmd == "skill-retrieval-eval":
+        cmd_skill_retrieval_eval(args)
 
 
 if __name__ == "__main__":
