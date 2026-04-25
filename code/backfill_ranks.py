@@ -12,6 +12,7 @@ so each route gets its own rate-limit bucket.
 import argparse
 import os
 import queue
+import sqlite3
 import sys
 import threading
 import time
@@ -134,17 +135,28 @@ def _worker(route: str, work_q: "queue.Queue", counters: dict, lock: threading.L
             continue
 
         if tier is not None:
-            conn.execute(
-                """
-                UPDATE players
-                   SET rank_tier = ?, rank_division = ?, lp = ?, last_updated = ?
-                 WHERE puuid = ?
-                """,
-                (tier, div, lp, int(time.time()), puuid),
-            )
-            if processed % 50 == 0:
-                conn.commit()
-            found += 1
+            # Retry on transient SQLite lock contention (busy_timeout already 30s,
+            # but multiple writers + WAL can still surface OperationalError under
+            # heavy concurrency). Re-queue puuid on persistent failure.
+            for attempt in range(3):
+                try:
+                    conn.execute(
+                        """
+                        UPDATE players
+                           SET rank_tier = ?, rank_division = ?, lp = ?, last_updated = ?
+                         WHERE puuid = ?
+                        """,
+                        (tier, div, lp, int(time.time()), puuid),
+                    )
+                    if processed % 50 == 0:
+                        conn.commit()
+                    found += 1
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" not in str(e) or attempt == 2:
+                        traceback.print_exc()
+                        break
+                    time.sleep(1.0 + attempt)
         processed += 1
         if processed % 200 == 0:
             with lock:
