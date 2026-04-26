@@ -339,6 +339,92 @@ def cmd_intervention_scan(args):
     )
 
 
+def cmd_causal_filter(args):
+    """Step 5 / Gate E: causal validation filter.
+
+    Reads ``artifacts/intervention_candidates.json``, runs matching + DR + DML
+    estimators per (decision_type, anchor_minute) pair, writes
+    ``artifacts/causal_filter_report.json``.
+    """
+    import json
+    import torch as _t
+
+    from model.causal_eval import run_causal_filter, write_causal_filter_report
+    from model.plan_b_model import PlanBModel
+
+    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    repo_artifacts = os.path.join(
+        os.path.dirname(__file__), "..", "..", "artifacts",
+    )
+    candidate_path = args.candidate_path or os.path.join(
+        repo_artifacts, "intervention_candidates.json",
+    )
+    artifact_path = args.artifact_path or os.path.join(
+        repo_artifacts, "causal_filter_report.json",
+    )
+
+    with open(candidate_path) as f:
+        cand_payload = json.load(f)
+    candidates = cand_payload["candidates"]
+    if not candidates:
+        raise SystemExit(f"no candidates in {candidate_path}; cannot run Gate E")
+
+    ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
+    max_puuids = ckpt.get("max_puuids", 20000)
+
+    train = load_split("train")
+    val = load_split("holdout")
+    cold = load_split("cold")
+    exclude = set(val) | set(cold)
+    puuid_index = build_puuid_index(train, max_puuids=max_puuids)
+
+    device = args.device or ("cuda" if _t.cuda.is_available() else "cpu")
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    if args.split == "game_cold":
+        ids = val
+    elif args.split == "player_cold":
+        ids = cold
+    else:
+        raise SystemExit(f"unknown split {args.split!r}")
+
+    print(
+        f"\n=== causal-filter: {args.split} "
+        f"({len(ids)} games, max_games={args.max_games or 'all'}) ==="
+    )
+    print(f"  candidates source: {candidate_path}")
+    print(f"  unique pairs: {len({(c['decision_type'], c['anchor_minute']) for c in candidates})}")
+
+    result = run_causal_filter(
+        model=model,
+        holdout_match_ids=ids,
+        puuid_index=puuid_index,
+        exclude_match_ids=exclude,
+        candidates=candidates,
+        device=device,
+        max_games=args.max_games,
+    )
+    s = result["summary"]
+    print(
+        f"\n  pairs_evaluated={s['n_pairs_evaluated']}  rows={s['n_rows']}\n"
+        f"  accepted={s['n_accepted']}  rejected={s['n_rejected']}\n"
+        f"  overlap_median={s['overlap_median']:.3f}  "
+        f"(floor={s['overlap_floor']:.2f})"
+    )
+    print("  accepts per decision type:")
+    for dt, n in s["accepts_per_type"].items():
+        marker = " ✓" if n >= 1 else " ·"
+        print(f"    {dt:<16s} {n}{marker}")
+
+    write_causal_filter_report(artifact_path, result)
+    print(
+        f"\n[causal-filter] gate_e_pass={result['gate_e_pass']} "
+        f"artifact={artifact_path}"
+    )
+
+
 def cmd_diagnose_rank(args):
     """Step 2 / Gate B: rank-use diagnostics.
 
@@ -750,6 +836,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_iv.add_argument("--js-floor", type=float, default=1e-4, dest="js_floor")
     p_iv.add_argument("--js-signal", type=float, default=5e-4, dest="js_signal")
 
+    p_cf = sub.add_parser(
+        "causal-filter",
+        help="Step 5 / Gate E: causal validation filter on Step 4 candidates",
+    )
+    p_cf.add_argument("--checkpoint", default=None, dest="checkpoint")
+    p_cf.add_argument(
+        "--candidate-path", default=None, dest="candidate_path",
+        help="Path to intervention_candidates.json (defaults to repo artifacts/)",
+    )
+    p_cf.add_argument("--artifact-path", default=None, dest="artifact_path")
+    p_cf.add_argument("--device", default=None)
+    p_cf.add_argument("--split", default="game_cold", choices=["game_cold", "player_cold"])
+    p_cf.add_argument("--max-games", type=int, default=None, dest="max_games")
+
     p_dr = sub.add_parser(
         "diagnose-rank",
         help="Step 2 / Gate B: shallow rank-band probes + swap/ablation + collapse monitors",
@@ -809,6 +909,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_skill_retrieval_eval(args)
     elif args.cmd == "intervention-scan":
         cmd_intervention_scan(args)
+    elif args.cmd == "causal-filter":
+        cmd_causal_filter(args)
 
 
 if __name__ == "__main__":

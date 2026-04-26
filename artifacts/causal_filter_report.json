@@ -1,0 +1,301 @@
+{
+  "_caveat": "51k corpus rank distribution is heavily skewed (\u224867% master_plus, \u224832% unranked); the rank-confounding check is therefore degenerate in this run \u2014 there is effectively only one band populating the candidate set. Treat the per-pair causal estimates as Gate E evidence within master_plus only; cross-band validation is deferred to the cloud-rebuilt rebalanced corpus.",
+  "accepted": [
+    {
+      "anchor_minute": 10,
+      "confidence": 0.9813723721364925,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 10,
+      "confidence": 3.686709095354267,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 10,
+      "confidence": 0.8670927732806818,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 14,
+      "confidence": 1.2064209316193852,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 14,
+      "confidence": 1.6451370700482917,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 14,
+      "confidence": 1.5155569273385279,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 18,
+      "confidence": 1.0893617395038868,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 18,
+      "confidence": 2.7762331639362205,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 18,
+      "confidence": 1.8483244166352346,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 18,
+      "confidence": 0.6225747818155312,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 22,
+      "confidence": 2.2985617615730205,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 22,
+      "confidence": 2.483108912262377,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 22,
+      "confidence": 1.0243539150575107,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 22,
+      "confidence": 1.1660546444219877,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 13,
+      "confidence": 0.5807799889291273,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 13,
+      "confidence": 0.47548432275208635,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 13,
+      "confidence": 0.72703023928001,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 13,
+      "confidence": 0.2652197876900719,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 16,
+      "confidence": 1.89402955351267,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 16,
+      "confidence": 3.1885182471814204,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 16,
+      "confidence": 0.6693597092794917,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 16,
+      "confidence": 0.7150218468718103,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 19,
+      "confidence": 0.6764178052173292,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 19,
+      "confidence": 1.1960357728021227,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 19,
+      "confidence": 1.299842308152073,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 11,
+      "confidence": 1.2432703314782343,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 11,
+      "confidence": 0.5089289041276549,
+      "decision_type": "SKILL_LEVEL_UP"
+    },
+    {
+      "anchor_minute": 11,
+      "confidence": 0.731774437332105,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 11,
+      "confidence": 1.4838506584488003,
+      "decision_type": "ENGAGE"
+    },
+    {
+      "anchor_minute": 12,
+      "confidence": 1.578524264979356,
+      "decision_type": "ITEM_PURCHASED"
+    },
+    {
+      "anchor_minute": 12,
+      "confidence": 1.0931463985285264,
+      "decision_type": "RECALL"
+    },
+    {
+      "anchor_minute": 12,
+      "confidence": 1.1916408363764284,
+      "decision_type": "ENGAGE"
+    }
+  ],
+  "gate_e_pass": true,
+  "rejected": [
+    {
+      "anchor_minute": 10,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=978, min=15)"
+    },
+    {
+      "anchor_minute": 10,
+      "decision_type": "ENGAGE",
+      "reason": "propensity overlap 0.00 < floor 0.2"
+    },
+    {
+      "anchor_minute": 10,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=1, n_c=977, min=15)"
+    },
+    {
+      "anchor_minute": 14,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "estimator contradicts (t=5.15)"
+    },
+    {
+      "anchor_minute": 14,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=974, min=15)"
+    },
+    {
+      "anchor_minute": 14,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=3, n_c=971, min=15)"
+    },
+    {
+      "anchor_minute": 18,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=888, min=15)"
+    },
+    {
+      "anchor_minute": 18,
+      "decision_type": "DISENGAGE",
+      "reason": "propensity overlap 0.07 < floor 0.2"
+    },
+    {
+      "anchor_minute": 22,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=816, min=15)"
+    },
+    {
+      "anchor_minute": 22,
+      "decision_type": "DISENGAGE",
+      "reason": "propensity overlap 0.09 < floor 0.2"
+    },
+    {
+      "anchor_minute": 13,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=974, min=15)"
+    },
+    {
+      "anchor_minute": 13,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=0, n_c=974, min=15)"
+    },
+    {
+      "anchor_minute": 16,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=912, min=15)"
+    },
+    {
+      "anchor_minute": 16,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=8, n_c=904, min=15)"
+    },
+    {
+      "anchor_minute": 19,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "estimator contradicts (t=2.76)"
+    },
+    {
+      "anchor_minute": 19,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=864, min=15)"
+    },
+    {
+      "anchor_minute": 19,
+      "decision_type": "DISENGAGE",
+      "reason": "propensity overlap 0.08 < floor 0.2"
+    },
+    {
+      "anchor_minute": 11,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=978, min=15)"
+    },
+    {
+      "anchor_minute": 11,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=4, n_c=974, min=15)"
+    },
+    {
+      "anchor_minute": 12,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "propensity overlap 0.16 < floor 0.2"
+    },
+    {
+      "anchor_minute": 12,
+      "decision_type": "WARD_PLACED",
+      "reason": "insufficient overlap (n_t=0, n_c=976, min=15)"
+    },
+    {
+      "anchor_minute": 12,
+      "decision_type": "DISENGAGE",
+      "reason": "insufficient overlap (n_t=3, n_c=973, min=15)"
+    }
+  ],
+  "summary": {
+    "accepts_per_type": {
+      "DISENGAGE": 0,
+      "ENGAGE": 8,
+      "ITEM_PURCHASED": 8,
+      "RECALL": 9,
+      "SKILL_LEVEL_UP": 7,
+      "WARD_PLACED": 0
+    },
+    "min_per_arm": 15,
+    "n_accepted": 32,
+    "n_pairs_evaluated": 54,
+    "n_rejected": 22,
+    "n_rows": 14176,
+    "overlap_fail_rate": 0.37037037037037035,
+    "overlap_floor": 0.2,
+    "overlap_median": 0.7144607843137255,
+    "rank_bands_seen": [
+      "master_plus"
+    ],
+    "significance_t": 1.96,
+    "stop_condition_triggered": false
+  }
+}
