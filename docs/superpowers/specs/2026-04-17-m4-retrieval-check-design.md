@@ -125,7 +125,11 @@ Interpretation then uses the baseline contrast below: the model should sit well 
 
 ### k sweep
 
-Run the eval at `k ∈ {16, 32, 64, 128, 256}` and report the entropy curve. Guards against the headline depending on a flattering `k`. Strictly cheap: same retrieval pass, just slice the topk wider once.
+Run the eval at `k ∈ {16, 32, 64, 128, 256}` and report the entropy curve. Guards against the headline depending on a flattering `k`. Strictly cheap: unrestricted eval performs one max-`k` retrieval pass per index and slices the wider top-k prefixes; skill-aware retrieval remains separately evaluated unless equivalence is proven.
+
+### Runtime knobs
+
+`python -m model.cli retrieval-eval` chooses `cuda` when CUDA is visible and otherwise uses `cpu`. Use `--device cpu` for CPU-only smoke runs or to avoid GPU scheduling, and use `--query-batch-size N` to control the exact `cdist + topk` query batch size. GPU acceleration helps the exact distance search only after repeated k-sweep work has been removed; it is not a replacement for single wide retrieval plus slicing. Tests and acceptance checks must not require a CUDA device.
 
 ### Per-minute breakdown
 

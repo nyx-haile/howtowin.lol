@@ -38,6 +38,34 @@ from model.rank_band import (
 
 PROBE_LAYERS = ("player_emb", "h_t", "post_mu", "prior_mu", "retrieval_key")
 
+PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT = (
+    "PlanBModel.forward samples RSSM latents during eval; rank diagnostics "
+    "therefore keep PlanB forwards at DataLoader batch_size=1 and count calls "
+    "instead of batching them under an unproven parity claim."
+)
+
+
+def _record_model_forward_counter(
+    counters: dict[str, Any] | None,
+    batch: Mapping,
+    *,
+    counter_name: str,
+) -> None:
+    if counters is None:
+        return
+    counters[counter_name] = int(counters.get(counter_name, 0)) + 1
+    counters["model_forward_calls"] = int(counters.get("model_forward_calls", 0)) + 1
+    batch_size = 1
+    tokens = batch.get("tokens")
+    if torch.is_tensor(tokens):
+        batch_size = int(tokens.size(0))
+    counters["max_model_forward_batch_size"] = max(
+        int(counters.get("max_model_forward_batch_size", 0)),
+        batch_size,
+    )
+    counters.setdefault("stochastic_planb_forward_batching", "disabled_batch_size_1")
+    counters.setdefault("stochastic_planb_forward_caveat", PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT)
+
 
 def select_band_stratified_match_ids(
     candidate_match_ids: list[str],
@@ -181,7 +209,7 @@ def _to_device(batch: Mapping, device: str) -> dict:
 
 @torch.no_grad()
 def collect_activations_and_collapse(
-    model, dataset, *, config: DiagnoseConfig,
+    model, dataset, *, config: DiagnoseConfig, counters: dict[str, Any] | None = None,
 ) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict[str, Any]]:
     """Single-pass collector: probe activations AND collapse/KL monitors.
 
@@ -218,6 +246,9 @@ def collect_activations_and_collapse(
             # PlanBModel.forward uses internally — deterministic).
             player_emb = model.player_enc(players, batch["player_ids"])  # (1, 10, D_MODEL)
             out = model(batch)
+            _record_model_forward_counter(
+                counters, batch, counter_name="collect_model_forward_calls",
+            )
 
             if counts["player_emb"] < config.max_anchors_per_layer:
                 pe = player_emb[0].detach().cpu().numpy()
@@ -325,7 +356,7 @@ def _score_at_minute(batch, scores: torch.Tensor, anchor_mask: torch.Tensor, tar
 
 @torch.no_grad()
 def run_swap_and_ablation(
-    model, dataset, *, config: DiagnoseConfig,
+    model, dataset, *, config: DiagnoseConfig, counters: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """Rank swap + rank-only / no-rank ablations.
 
@@ -356,6 +387,9 @@ def run_swap_and_ablation(
             y_true.append(float(batch["outcome"][0].item()))
 
             out_base = model(batch)
+            _record_model_forward_counter(
+                counters, batch, counter_name="swap_base_forward_calls",
+            )
             scores_base = torch.sigmoid(out_base["outcome_logits"][0])
             p_base.append(_score_at_minute(batch, scores_base, out_base["anchor_mask"][0], 15))
 
@@ -364,7 +398,11 @@ def run_swap_and_ablation(
             if prev_rank_lp is not None and prev_rank_lp.shape == players[..., :2].shape:
                 players_swap = players.clone()
                 players_swap[..., :2] = prev_rank_lp
-                out_swap = model({**batch, "players": players_swap})
+                swap_batch = {**batch, "players": players_swap}
+                out_swap = model(swap_batch)
+                _record_model_forward_counter(
+                    counters, swap_batch, counter_name="swap_rank_forward_calls",
+                )
                 scores_swap = torch.sigmoid(out_swap["outcome_logits"][0])
                 p_swap.append(_score_at_minute(batch, scores_swap, out_swap["anchor_mask"][0], 15))
             else:
@@ -372,13 +410,21 @@ def run_swap_and_ablation(
 
             players_no_rank = players.clone()
             players_no_rank[..., :2] = 0.0
-            out_nr = model({**batch, "players": players_no_rank})
+            no_rank_batch = {**batch, "players": players_no_rank}
+            out_nr = model(no_rank_batch)
+            _record_model_forward_counter(
+                counters, no_rank_batch, counter_name="swap_no_rank_forward_calls",
+            )
             scores_nr = torch.sigmoid(out_nr["outcome_logits"][0])
             p_no_rank.append(_score_at_minute(batch, scores_nr, out_nr["anchor_mask"][0], 15))
 
             players_rank_only = players.clone()
             players_rank_only[..., 2:] = 0.0
-            out_ro = model({**batch, "players": players_rank_only})
+            rank_only_batch = {**batch, "players": players_rank_only}
+            out_ro = model(rank_only_batch)
+            _record_model_forward_counter(
+                counters, rank_only_batch, counter_name="swap_rank_only_forward_calls",
+            )
             scores_ro = torch.sigmoid(out_ro["outcome_logits"][0])
             p_rank_only.append(_score_at_minute(batch, scores_ro, out_ro["anchor_mask"][0], 15))
 
@@ -517,7 +563,10 @@ def run_gate_b_diagnosis(
     )
 
     print(f"[rank-diagnose] collect activations + collapse: split={split} games={n_use}", flush=True)
-    activations, collapse = collect_activations_and_collapse(model, ds, config=config)
+    eval_counters: dict[str, Any] = {}
+    activations, collapse = collect_activations_and_collapse(
+        model, ds, config=config, counters=eval_counters,
+    )
     probe_auc: dict[str, float] = {}
     for name in PROBE_LAYERS:
         X, y = activations[name]
@@ -534,7 +583,7 @@ def run_gate_b_diagnosis(
     )
 
     print(f"[rank-diagnose] swap + ablation: games={config.swap_sample}", flush=True)
-    swap_abl = run_swap_and_ablation(model, ds, config=config)
+    swap_abl = run_swap_and_ablation(model, ds, config=config, counters=eval_counters)
     print(
         f"[rank-diagnose] swap_delta={swap_abl['swap_delta']:.3f} "
         f"baseline_m15={swap_abl['baseline_auc_m15']:.3f} "
@@ -568,6 +617,11 @@ def run_gate_b_diagnosis(
             "stratification_counts": stratification_counts,
             "per_band_cap": per_band_cap if band_stratified else None,
             "collapse": collapse,
+            "stochastic_eval_gate": {
+                "planb_forward_batching": "disabled_batch_size_1",
+                "reason": PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT,
+                "counters": eval_counters,
+            },
             "band_scheme": {
                 "names": BAND_NAMES,
                 "tier_to_band": {str(k): v for k, v in TIER_TO_BAND.items()},

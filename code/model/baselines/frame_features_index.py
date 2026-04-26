@@ -22,25 +22,66 @@ FRAME_BASELINE_STATS = (
 N_STATS = len(FRAME_BASELINE_STATS)
 N_PARTICIPANTS = 10
 FRAME_BASELINE_DIM = N_STATS * N_PARTICIPANTS + 1  # 91
+SQLITE_PARAM_CHUNK_SIZE = 900
+
+
+def _chunks(items: list[str], chunk_size: int):
+    chunk_size = max(1, min(int(chunk_size), SQLITE_PARAM_CHUNK_SIZE))
+    for start in range(0, len(items), chunk_size):
+        yield items[start:start + chunk_size]
 
 
 def _read_game_frames(match_id: str):
-    conn = get_conn()
-    try:
-        rows = conn.execute(
-            f"SELECT timestamp_ms, participant_slot, "
-            f"{', '.join(FRAME_BASELINE_STATS)} "
-            f"FROM frames WHERE match_id = ? "
-            f"AND participant_slot BETWEEN 1 AND 10 "
-            f"ORDER BY timestamp_ms ASC",
-            (match_id,),
-        ).fetchall()
-        game = conn.execute(
-            "SELECT winning_team FROM games WHERE match_id = ?", (match_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return rows, game
+    return read_game_frames_many([match_id])[match_id]
+
+
+def read_game_frames_many(
+    match_ids: list[str],
+    *,
+    chunk_size: int = SQLITE_PARAM_CHUNK_SIZE,
+) -> dict[str, tuple[list, object | None]]:
+    """Read frame rows and game outcomes for many matches with chunked DB IO.
+
+    The returned dict preserves the input match-id order. Frame rows are
+    grouped by match id and ordered by timestamp then participant slot so
+    callers can emit vectors in the same order as the original match list.
+    """
+    grouped: dict[str, tuple[list, object | None]] = {
+        mid: ([], None) for mid in match_ids
+    }
+    if not match_ids:
+        return grouped
+
+    for chunk in _chunks(match_ids, chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        frames_by_mid = {mid: [] for mid in chunk}
+        games_by_mid = {}
+        conn = get_conn()
+        try:
+            frame_rows = conn.execute(
+                f"SELECT match_id, timestamp_ms, participant_slot, "
+                f"{', '.join(FRAME_BASELINE_STATS)} "
+                f"FROM frames WHERE match_id IN ({placeholders}) "
+                f"AND participant_slot BETWEEN 1 AND 10 "
+                f"ORDER BY match_id ASC, timestamp_ms ASC, participant_slot ASC",
+                chunk,
+            ).fetchall()
+            game_rows = conn.execute(
+                f"SELECT match_id, winning_team FROM games "
+                f"WHERE match_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for row in frame_rows:
+            frames_by_mid[row["match_id"]].append(row)
+        for row in game_rows:
+            games_by_mid[row["match_id"]] = row
+        for mid in chunk:
+            grouped[mid] = (frames_by_mid.get(mid, []), games_by_mid.get(mid))
+
+    return grouped
 
 
 def _build_per_anchor_vectors(rows):
@@ -69,6 +110,7 @@ def build_frame_features_index(
     *,
     train_match_ids: list[str],
     exclude_match_ids: set[str],
+    db_chunk_size: int = SQLITE_PARAM_CHUNK_SIZE,
     log_every: int = 100,
 ) -> IndexBundle:
     eligible = [m for m in train_match_ids if m not in exclude_match_ids]
@@ -93,23 +135,27 @@ def build_frame_features_index(
     blue_win_list: list[int] = []
     mid_list: list[str] = []
 
-    for i, mid in enumerate(eligible):
-        try:
-            frame_rows, game = _read_game_frames(mid)
-            if not frame_rows or game is None:
+    for chunk_start in range(0, len(eligible), max(1, int(db_chunk_size))):
+        chunk = eligible[chunk_start:chunk_start + max(1, int(db_chunk_size))]
+        grouped = read_game_frames_many(chunk, chunk_size=db_chunk_size)
+        for offset, mid in enumerate(chunk):
+            i = chunk_start + offset
+            try:
+                frame_rows, game = grouped[mid]
+                if not frame_rows or game is None:
+                    continue
+                vecs, minutes = _build_per_anchor_vectors(frame_rows)
+                outcome = 1 if game["winning_team"] == 100 else 0
+                T = vecs.shape[0]
+                rows.append(vecs)
+                minutes_list.append(minutes)
+                blue_win_list.extend([outcome] * T)
+                mid_list.extend([mid] * T)
+            except Exception as e:
+                print(f"[frame_features] skipping {mid}: {e}")
                 continue
-            vecs, minutes = _build_per_anchor_vectors(frame_rows)
-            outcome = 1 if game["winning_team"] == 100 else 0
-            T = vecs.shape[0]
-            rows.append(vecs)
-            minutes_list.append(minutes)
-            blue_win_list.extend([outcome] * T)
-            mid_list.extend([mid] * T)
-        except Exception as e:
-            print(f"[frame_features] skipping {mid}: {e}")
-            continue
-        if (i + 1) % log_every == 0:
-            print(f"[frame_features] {i + 1}/{len(eligible)} games encoded")
+            if (i + 1) % log_every == 0:
+                print(f"[frame_features] {i + 1}/{len(eligible)} games encoded")
 
     corpus_raw = torch.from_numpy(np.concatenate(rows, axis=0)) if rows \
                  else torch.zeros(0, FRAME_BASELINE_DIM)
@@ -139,3 +185,24 @@ def encode_frame_features_query(match_id: str) -> tuple[torch.Tensor, torch.Tens
         return torch.zeros(0, FRAME_BASELINE_DIM), torch.zeros(0, dtype=torch.int64)
     vecs, minutes = _build_per_anchor_vectors(frame_rows)
     return torch.from_numpy(vecs), torch.from_numpy(minutes)
+
+
+def encode_frame_features_queries(
+    match_ids: list[str],
+    *,
+    db_chunk_size: int = SQLITE_PARAM_CHUNK_SIZE,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Return frame-feature query tensors for many matches in input order."""
+    grouped = read_game_frames_many(match_ids, chunk_size=db_chunk_size)
+    out: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    for mid in match_ids:
+        frame_rows, _ = grouped[mid]
+        if not frame_rows:
+            out[mid] = (
+                torch.zeros(0, FRAME_BASELINE_DIM),
+                torch.zeros(0, dtype=torch.int64),
+            )
+            continue
+        vecs, minutes = _build_per_anchor_vectors(frame_rows)
+        out[mid] = (torch.from_numpy(vecs), torch.from_numpy(minutes))
+    return out

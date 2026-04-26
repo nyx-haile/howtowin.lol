@@ -5,14 +5,45 @@ from torch.utils.data import DataLoader
 from model.dataset import collate_games
 
 
+PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT = (
+    "PlanBModel.forward samples RSSM latents during eval; these helpers keep "
+    "PlanB model forwards at DataLoader batch_size=1 until a deterministic "
+    "or RNG-replay contract exists."
+)
+
+
+def _record_counter(counters: dict | None, name: str, amount: int = 1) -> None:
+    if counters is None:
+        return
+    counters[name] = int(counters.get(name, 0)) + amount
+
+
+def _record_model_forward(counters: dict | None, batch: dict) -> None:
+    """Record the explicit no-batched-PlanB-forward evaluation contract."""
+    if counters is None:
+        return
+    _record_counter(counters, "model_forward_calls")
+    batch_size = 1
+    tokens = batch.get("tokens")
+    if torch.is_tensor(tokens):
+        batch_size = int(tokens.size(0))
+    counters["max_model_forward_batch_size"] = max(
+        int(counters.get("max_model_forward_batch_size", 0)),
+        batch_size,
+    )
+    counters.setdefault("stochastic_planb_forward_batching", "disabled_batch_size_1")
+    counters.setdefault("stochastic_planb_forward_caveat", PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT)
+
+
 @torch.no_grad()
-def outcome_auc_by_minute(model, ds, minutes=(5, 10, 15, 20, 25)):
+def outcome_auc_by_minute(model, ds, minutes=(5, 10, 15, 20, 25), *, counters: dict | None = None):
     model.eval()
     loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
     y_true = {m: [] for m in minutes}
     y_score = {m: [] for m in minutes}
     for batch in loader:
         out = model(batch)
+        _record_model_forward(counters, batch)
         n_anchors = int(batch["anchor_mask"][0].sum().item())
         truth = float(batch["outcome"][0].item())
         scores = torch.sigmoid(out["outcome_logits"])[0]
@@ -31,19 +62,21 @@ def outcome_auc_by_minute(model, ds, minutes=(5, 10, 15, 20, 25)):
 
 
 @torch.no_grad()
-def imagination_rollout_top5(model, ds, n_steps: int = 3):
-    """Teacher-force to a real anchor, then roll forward with true future event windows."""
+def imagination_rollout_top5(model, ds, n_steps: int = 3, *, counters: dict | None = None):
+    """Teacher-force to one game at a time, then roll forward with true future event windows."""
     model.eval()
     loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
     per_step_hits = [[] for _ in range(n_steps)]
 
     for batch in loader:
         out = model(batch)
+        _record_model_forward(counters, batch)
         n_anchors = int(batch["anchor_mask"][0].sum().item())
         if n_anchors < 2 + n_steps:
             continue
 
         seed_t = n_anchors - n_steps - 1
+        _record_counter(counters, "rollout_prior_single_calls")
         steps = model.rollout_prior_single(
             h0=out["h"][0, seed_t],
             z0=out["z"][0, seed_t],
@@ -71,7 +104,7 @@ def imagination_rollout_top5(model, ds, n_steps: int = 3):
 
 
 @torch.no_grad()
-def frozen_minute_0_auc(model, ds, target_minute: int = 15) -> float:
+def frozen_minute_0_auc(model, ds, target_minute: int = 15, *, counters: dict | None = None) -> float:
     """Feed only static + player streams; zero out the dynamic sequence."""
     model.eval()
     loader = DataLoader(ds, batch_size=1, collate_fn=collate_games, shuffle=False)
@@ -96,6 +129,7 @@ def frozen_minute_0_auc(model, ds, target_minute: int = 15) -> float:
         frozen_batch["frame_features"] = torch.zeros_like(batch["frame_features"])
         frozen_batch["anchor_macro_features"] = torch.zeros_like(batch["anchor_macro_features"])
         out = model(frozen_batch)
+        _record_model_forward(counters, frozen_batch)
         n_anchors = int(batch["anchor_mask"][0].sum().item())
         if target_minute < n_anchors:
             y_true.append(float(batch["outcome"][0].item()))

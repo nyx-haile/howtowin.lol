@@ -24,6 +24,13 @@ def _encode_game_static_key(model, batch) -> torch.Tensor:
 
 
 @torch.no_grad()
+def _encode_batch_static_keys(model, batch) -> torch.Tensor:
+    """Return (B, D_H) static-only keys for a batched game batch."""
+    static_summary = model.encode_static_summary(batch["static"])  # (B, D_H)
+    return static_summary.detach().cpu()
+
+
+@torch.no_grad()
 def build_static_only_index(
     *,
     model,
@@ -31,6 +38,7 @@ def build_static_only_index(
     exclude_match_ids: set[str],
     puuid_index: dict,
     device: str = "cpu",
+    batch_size: int = 64,
     log_every: int = 100,
 ) -> IndexBundle:
     model.eval()
@@ -40,14 +48,21 @@ def build_static_only_index(
         return _build_static_only_inner(
             model=model, train_match_ids=train_match_ids,
             exclude_match_ids=exclude_match_ids, puuid_index=puuid_index,
-            device=device, log_every=log_every,
+            device=device, batch_size=batch_size, log_every=log_every,
         )
     finally:
         model.to(original_device)
 
 
 def _build_static_only_inner(
-    *, model, train_match_ids, exclude_match_ids, puuid_index, device, log_every,
+    *,
+    model,
+    train_match_ids,
+    exclude_match_ids,
+    puuid_index,
+    device,
+    batch_size,
+    log_every,
 ) -> IndexBundle:
     eligible = [m for m in train_match_ids if m not in exclude_match_ids]
     if not eligible:
@@ -64,7 +79,12 @@ def _build_static_only_inner(
 
     ds = MatchDataset(eligible, puuid_index=puuid_index,
                       exclude_match_ids=exclude_match_ids, cache_size=1)
-    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
+    loader = DataLoader(
+        ds,
+        batch_size=max(1, int(batch_size)),
+        shuffle=False,
+        collate_fn=collate_games,
+    )
 
     rows: list[torch.Tensor] = []
     minutes_list: list[torch.Tensor] = []
@@ -73,32 +93,40 @@ def _build_static_only_inner(
 
     for i, batch in enumerate(loader):
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+        batch_start = i * loader.batch_size
+        batch_match_ids = eligible[batch_start:batch_start + batch["static"].size(0)]
         try:
-            key = _encode_game_static_key(model, batch)
+            keys = _encode_batch_static_keys(model, batch)
         except Exception as e:
-            print(f"[static_only] skipping {eligible[i]}: {e}")
+            print(f"[static_only] skipping batch {batch_match_ids}: {e}")
             continue
-        T = batch["anchor_positions"].size(1)
 
-        anchor_pos = batch["anchor_positions"][0].long()
-        ts = batch["token_timestamps"][0]
-        anchor_ts = ts.gather(0, anchor_pos)
-        minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
-        outcome = int(batch["outcome"][0].item())
+        for bi, mid in enumerate(batch_match_ids):
+            anchor_mask = batch["anchor_mask"][bi]
+            if not anchor_mask.any():
+                continue
+            anchor_pos = batch["anchor_positions"][bi, anchor_mask].long()
+            ts = batch["token_timestamps"][bi]
+            anchor_ts = ts.gather(0, anchor_pos)
+            minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
+            outcome = int(batch["outcome"][bi].item())
+            T = int(anchor_mask.sum().item())
 
-        rows.append(key.unsqueeze(0).expand(T, -1).clone())
-        minutes_list.append(minutes)
-        blue_win_list.extend([outcome] * T)
-        mid_list.extend([eligible[i]] * T)
+            rows.append(keys[bi].unsqueeze(0).expand(T, -1).clone())
+            minutes_list.append(minutes)
+            blue_win_list.extend([outcome] * T)
+            mid_list.extend([mid] * T)
 
-        if (i + 1) % log_every == 0:
-            print(f"[static_only] {i + 1}/{len(eligible)} games encoded")
+        encoded = min(batch_start + len(batch_match_ids), len(eligible))
+        if encoded % log_every == 0 or encoded == len(eligible):
+            print(f"[static_only] {encoded}/{len(eligible)} games encoded")
 
-    corpus_raw = torch.cat(rows, dim=0)
-    minutes_all = torch.cat(minutes_list, dim=0)
+    corpus_raw = torch.cat(rows, dim=0) if rows else torch.zeros(0, D_H)
+    minutes_all = torch.cat(minutes_list, dim=0) if minutes_list else torch.zeros(0, dtype=torch.int64)
     blue_win_all = torch.tensor(blue_win_list, dtype=torch.int8)
 
-    whitener = Whitener.fit(corpus_raw)
+    whitener = Whitener.fit(corpus_raw) if corpus_raw.shape[0] > 0 \
+        else Whitener(mu=torch.zeros(D_H), sigma=torch.ones(D_H))
     corpus_white = whitener.apply(corpus_raw)
 
     return IndexBundle(
@@ -119,3 +147,29 @@ def encode_static_only_query_key(model, batch) -> torch.Tensor:
     key = _encode_game_static_key(model, batch)            # (D_H,)
     T = batch["anchor_positions"].size(1)
     return key.unsqueeze(0).expand(T, -1).clone()
+
+
+@torch.no_grad()
+def encode_static_only_query_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flatten batched static-only query keys and anchor minutes.
+
+    Returns ``(keys, minutes)`` with one row per valid anchor in the batch,
+    preserving the DataLoader/sample order and ignoring padded anchors.
+    """
+    keys = _encode_batch_static_keys(model, batch)
+    rows: list[torch.Tensor] = []
+    mins: list[torch.Tensor] = []
+    for bi in range(batch["static"].size(0)):
+        anchor_mask = batch["anchor_mask"][bi]
+        if not anchor_mask.any():
+            continue
+        anchor_pos = batch["anchor_positions"][bi, anchor_mask].long()
+        ts = batch["token_timestamps"][bi]
+        anchor_ts = ts.gather(0, anchor_pos)
+        minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
+        T = int(anchor_mask.sum().item())
+        rows.append(keys[bi].unsqueeze(0).expand(T, -1).clone())
+        mins.append(minutes)
+    if not rows:
+        return torch.zeros(0, D_H), torch.zeros(0, dtype=torch.int64)
+    return torch.cat(rows, dim=0), torch.cat(mins, dim=0)

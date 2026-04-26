@@ -241,3 +241,44 @@ def test_write_intervention_candidates_artifact_round_trip():
         with open(path) as f:
             loaded = json.load(f)
         assert loaded == payload
+
+
+def test_score_anchor_records_rollout_counters_without_batching():
+    from model.intervention_driver import (
+        PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT,
+        _score_anchor,
+    )
+
+    model = _tiny_model()
+    inputs = _synthetic_rollout_inputs(T=4, L=8, count=2)
+    torch.manual_seed(2)
+    encoded = {
+        "h": torch.randn(4, D_H),
+        "z": torch.randn(4, model.z0.numel()),
+        "static_tokens": inputs["static_tokens"][0],
+        "token_embeddings": inputs["token_embeddings"],
+        "event_window_positions": inputs["event_window_positions"],
+        "event_window_offsets": inputs["event_window_offsets"],
+        "event_window_counts": inputs["event_window_counts"],
+        "anchor_mask": inputs["anchor_mask"][0],
+        "n_valid_anchors": 4,
+    }
+    synthetic_embs = {
+        dt: build_synthetic_token_embedding(model, decision_type=dt)
+        for dt in INTERVENTION_DECISION_TYPES
+    }
+    counters = {}
+
+    scores = _score_anchor(
+        model,
+        encoded,
+        anchor_idx=0,
+        n_steps=2,
+        synthetic_embs=synthetic_embs,
+        counters=counters,
+    )
+
+    assert set(scores) == set(INTERVENTION_DECISION_TYPES)
+    assert counters["base_rollout_calls"] == 1
+    assert counters["intervention_rollout_calls"] == len(INTERVENTION_DECISION_TYPES)
+    assert "one game/anchor at a time" in PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT

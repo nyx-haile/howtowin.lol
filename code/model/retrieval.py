@@ -408,6 +408,15 @@ _STAGE_ADJACENT = 1
 _STAGE_UNRESTRICTED = 2
 
 
+def _topk_smallest(d: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return row-wise nearest distances/indices.
+
+    Kept as a tiny helper so tests can assert which skill-aware stages are
+    actually evaluated without monkeypatching ``torch.Tensor`` internals.
+    """
+    return d.topk(k, dim=1, largest=False)
+
+
 def _effective_mask(row_band: torch.Tensor, q_band: int, max_dist: int) -> torch.Tensor:
     """True for rows whose band is within ``max_dist`` of ``q_band``.
 
@@ -522,67 +531,101 @@ def query_index_skill_aware(
         same_elig = same_mask & not_excluded                     # (b, N)
         adj_elig = adj_mask & not_excluded                       # (b, N)
 
-        # Distance-penalised distances for the unrestricted fallback. For
-        # ranked queries: penalty^|diff| where row is ranked, else 1. For
-        # unranked queries: no penalty.
-        penalty_pow = torch.pow(penalty_t, diff.to(d_full.dtype))  # (b, N)
-        ones = torch.ones_like(penalty_pow)
-        dist_penalty = torch.where(valid_row.unsqueeze(0).expand(b, N), penalty_pow, ones)
-        dist_penalty = torch.where(unranked_q.expand(b, N), ones, dist_penalty)
+        same_eligible_count = same_elig.sum(dim=1)               # (b,)
+        same_kept = torch.clamp(same_eligible_count, max=k)      # (b,)
+        ranked_q = ~unranked_q.squeeze(1)                        # (b,)
+        same_stage_safe = (
+            (~ranked_q | (same_kept >= min_effective_k))
+            & (same_eligible_count >= k)
+        )
 
         # Build per-stage distance tensors with +inf for ineligible rows.
         d_same = torch.where(same_elig, d_full, torch.full_like(d_full, INF))
-        d_adj = torch.where(adj_elig, d_full, torch.full_like(d_full, INF))
-        d_unr = torch.where(not_excluded.expand(b, N), d_full * dist_penalty, torch.full_like(d_full, INF))
 
-        # Batched top-k for each stage.
-        d_same_top, idx_same_top = d_same.topk(k, dim=1, largest=False)
-        d_adj_top, idx_adj_top = d_adj.topk(k, dim=1, largest=False)
-        d_unr_top, idx_unr_top = d_unr.topk(k, dim=1, largest=False)
+        # Same-stage top-k is always needed. When the entire batch is provably
+        # same-stage under the existing per-k rules and has enough same-stage
+        # rows to avoid the pathological fallback, skip the adjacent and
+        # unrestricted top-k work entirely.
+        d_same_top, idx_same_top = _topk_smallest(d_same, k)
 
         # Effective cohort = rows eligible at the same-band stage BEFORE
         # exclude (matches semantics of the original implementation).
         eff_k_b = same_mask.sum(dim=1).to(torch.long)            # (b,)
 
-        # Stage selection: escalate when the kept count would fall short of
-        # min_effective_k, but only for ranked queries.
-        same_kept = torch.clamp(same_elig.sum(dim=1), max=k)     # (b,)
-        adj_kept = torch.clamp(adj_elig.sum(dim=1), max=k)       # (b,)
-        ranked_q = ~unranked_q.squeeze(1)                        # (b,)
-        escalate_to_adj = ranked_q & (same_kept < min_effective_k)
-        escalate_to_unr = escalate_to_adj & (adj_kept < min_effective_k)
-        stage_b = torch.where(
-            escalate_to_unr, torch.full_like(escalate_to_unr, _STAGE_UNRESTRICTED, dtype=torch.long),
-            torch.where(
-                escalate_to_adj, torch.full_like(escalate_to_adj, _STAGE_ADJACENT, dtype=torch.long),
-                torch.full_like(ranked_q, _STAGE_SAME_BAND, dtype=torch.long),
-            ),
-        )                                                         # (b,)
+        same_only_batch = bool(same_stage_safe.all().item())
+        if same_only_batch:
+            chosen_idx = idx_same_top
+            chosen_d = d_same_top
+            stage_b = torch.full((b,), _STAGE_SAME_BAND, dtype=torch.long, device=device)
+        else:
+            # Distance-penalised distances for the unrestricted fallback. For
+            # ranked queries: penalty^|diff| where row is ranked, else 1. For
+            # unranked queries: no penalty.
+            penalty_pow = torch.pow(penalty_t, diff.to(d_full.dtype))  # (b, N)
+            ones = torch.ones_like(penalty_pow)
+            dist_penalty = torch.where(
+                valid_row.unsqueeze(0).expand(b, N),
+                penalty_pow,
+                ones,
+            )
+            dist_penalty = torch.where(
+                unranked_q.expand(b, N),
+                ones,
+                dist_penalty,
+            )
 
-        # Gather chosen indices/distances by stage.
-        stage_exp = stage_b.unsqueeze(1).expand(-1, k)            # (b, k)
-        chosen_idx = torch.where(
-            stage_exp == _STAGE_UNRESTRICTED, idx_unr_top,
-            torch.where(stage_exp == _STAGE_ADJACENT, idx_adj_top, idx_same_top),
-        )
-        chosen_d = torch.where(
-            stage_exp == _STAGE_UNRESTRICTED, d_unr_top,
-            torch.where(stage_exp == _STAGE_ADJACENT, d_adj_top, d_same_top),
-        )
+            d_adj = torch.where(adj_elig, d_full, torch.full_like(d_full, INF))
+            d_unr = torch.where(
+                not_excluded.expand(b, N),
+                d_full * dist_penalty,
+                torch.full_like(d_full, INF),
+            )
 
-        # Pathological-fallback: if any selected distance is +inf (e.g. tiny
-        # corpus where even the unrestricted-after-exclude pool is < k), fall
-        # back to unrestricted with no exclude/no penalty for those queries.
-        if torch.isinf(chosen_d).any():
-            d_full_top, idx_full_top = d_full.topk(min(k, N), dim=1, largest=False)
-            if d_full_top.shape[1] < k:
-                pad = k - d_full_top.shape[1]
-                d_full_top = torch.cat([d_full_top, d_full_top[:, -1:].expand(-1, pad)], dim=1)
-                idx_full_top = torch.cat([idx_full_top, idx_full_top[:, -1:].expand(-1, pad)], dim=1)
-            inf_row = torch.isinf(chosen_d).any(dim=1)            # (b,)
-            chosen_idx = torch.where(inf_row.unsqueeze(1), idx_full_top, chosen_idx)
-            chosen_d = torch.where(inf_row.unsqueeze(1), d_full_top, chosen_d)
-            stage_b = torch.where(inf_row, torch.full_like(stage_b, _STAGE_UNRESTRICTED), stage_b)
+            # Batched top-k for fallback stages.
+            d_adj_top, idx_adj_top = _topk_smallest(d_adj, k)
+            d_unr_top, idx_unr_top = _topk_smallest(d_unr, k)
+
+            adj_eligible_count = adj_elig.sum(dim=1)             # (b,)
+            adj_kept = torch.clamp(adj_eligible_count, max=k)    # (b,)
+
+            # Stage selection: escalate when the kept count would fall short
+            # of min_effective_k, but only for ranked queries. This preserves
+            # the current per-k semantics, including k < min_effective_k.
+            escalate_to_adj = ranked_q & (same_kept < min_effective_k)
+            escalate_to_unr = escalate_to_adj & (adj_kept < min_effective_k)
+            stage_b = torch.where(
+                escalate_to_unr, torch.full_like(escalate_to_unr, _STAGE_UNRESTRICTED, dtype=torch.long),
+                torch.where(
+                    escalate_to_adj, torch.full_like(escalate_to_adj, _STAGE_ADJACENT, dtype=torch.long),
+                    torch.full_like(ranked_q, _STAGE_SAME_BAND, dtype=torch.long),
+                ),
+            )                                                     # (b,)
+
+            # Gather chosen indices/distances by stage.
+            stage_exp = stage_b.unsqueeze(1).expand(-1, k)        # (b, k)
+            chosen_idx = torch.where(
+                stage_exp == _STAGE_UNRESTRICTED, idx_unr_top,
+                torch.where(stage_exp == _STAGE_ADJACENT, idx_adj_top, idx_same_top),
+            )
+            chosen_d = torch.where(
+                stage_exp == _STAGE_UNRESTRICTED, d_unr_top,
+                torch.where(stage_exp == _STAGE_ADJACENT, d_adj_top, d_same_top),
+            )
+
+            # Pathological-fallback: if any selected distance is +inf (e.g.
+            # tiny corpus where even the unrestricted-after-exclude pool is
+            # < k), fall back to unrestricted with no exclude/no penalty for
+            # those queries.
+            if torch.isinf(chosen_d).any():
+                d_full_top, idx_full_top = _topk_smallest(d_full, min(k, N))
+                if d_full_top.shape[1] < k:
+                    pad = k - d_full_top.shape[1]
+                    d_full_top = torch.cat([d_full_top, d_full_top[:, -1:].expand(-1, pad)], dim=1)
+                    idx_full_top = torch.cat([idx_full_top, idx_full_top[:, -1:].expand(-1, pad)], dim=1)
+                inf_row = torch.isinf(chosen_d).any(dim=1)        # (b,)
+                chosen_idx = torch.where(inf_row.unsqueeze(1), idx_full_top, chosen_idx)
+                chosen_d = torch.where(inf_row.unsqueeze(1), d_full_top, chosen_d)
+                stage_b = torch.where(inf_row, torch.full_like(stage_b, _STAGE_UNRESTRICTED), stage_b)
 
         # In-band fraction (NaN for unranked queries).
         chosen_band = row_band[chosen_idx]                        # (b, k)

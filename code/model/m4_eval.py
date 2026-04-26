@@ -129,11 +129,20 @@ def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
     sweep_means: dict[int, float] = {}
     headline_per_minute: dict[int, float] = {}
     headline_cohort_h = None
-    for k in k_sweep:
-        cohort_idx, _ = query_index(
-            bundle, queries_raw, k=k, device=device,
-            batch_size=query_batch_size,
-        )
+    k_values = [int(k) for k in k_sweep]
+    if not k_values:
+        return {
+            "k_sweep": sweep_means,
+            "per_minute_at_headline_k": headline_per_minute,
+            "headline_cohort_entropies": headline_cohort_h,
+        }
+
+    cohort_idx_wide, _ = query_index(
+        bundle, queries_raw, k=max(k_values), device=device,
+        batch_size=query_batch_size,
+    )
+    for k in k_values:
+        cohort_idx = cohort_idx_wide[:, :k]
         sweep_means[int(k)] = mean_entropy_at_k(cohort_idx, bundle.row_blue_win)
         if int(k) == int(headline_k):
             cohort_h = cohort_entropies(cohort_idx, bundle.row_blue_win)
@@ -198,7 +207,7 @@ def run_m4_eval(
         if static_only_bundle is not None:
             so_queries = _build_static_only_queries(
                 model, holdout_match_ids, puuid_index, exclude_match_ids,
-                device, headline_minutes,
+                device, headline_minutes, batch_size=query_batch_size,
             )
             out["static_only"] = _eval_one_index(
                 static_only_bundle, so_queries[0], so_queries[1],
@@ -222,21 +231,23 @@ def run_m4_eval(
 
 @torch.no_grad()
 def _build_static_only_queries(model, holdout_match_ids, puuid_index,
-                               exclude_match_ids, device, mid_minutes):
-    from model.baselines.static_only_index import encode_static_only_query_key
+                               exclude_match_ids, device, mid_minutes,
+                               batch_size: int = 64):
+    from model.baselines.static_only_index import encode_static_only_query_keys
     from model.plan_b_model import D_H
     ds = MatchDataset(holdout_match_ids, puuid_index=puuid_index,
                       exclude_match_ids=exclude_match_ids, cache_size=1)
-    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
+    loader = DataLoader(
+        ds,
+        batch_size=max(1, int(batch_size)),
+        shuffle=False,
+        collate_fn=collate_games,
+    )
     keys_list, mins_list = [], []
     mid_set = set(int(m) for m in mid_minutes)
     for batch in loader:
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-        keys = encode_static_only_query_key(model, batch)  # (T, D_H)
-        anchor_pos = batch["anchor_positions"][0].long()
-        ts = batch["token_timestamps"][0]
-        anchor_ts = ts.gather(0, anchor_pos)
-        minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
+        keys, minutes = encode_static_only_query_keys(model, batch)
         mask = torch.tensor([int(m.item()) in mid_set for m in minutes], dtype=torch.bool)
         if mask.any():
             keys_list.append(keys[mask].cpu())
@@ -248,12 +259,13 @@ def _build_static_only_queries(model, holdout_match_ids, puuid_index,
 
 def _build_frame_features_queries(holdout_match_ids, mid_minutes):
     from model.baselines.frame_features_index import (
-        encode_frame_features_query, FRAME_BASELINE_DIM,
+        encode_frame_features_queries, FRAME_BASELINE_DIM,
     )
     keys_list, mins_list = [], []
     mid_set = set(int(m) for m in mid_minutes)
+    query_by_mid = encode_frame_features_queries(holdout_match_ids)
     for mid in holdout_match_ids:
-        keys, minutes = encode_frame_features_query(mid)
+        keys, minutes = query_by_mid[mid]
         if keys.shape[0] == 0:
             continue
         mask = torch.tensor([int(m.item()) in mid_set for m in minutes], dtype=torch.bool)

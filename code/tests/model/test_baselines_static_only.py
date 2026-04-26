@@ -1,4 +1,15 @@
 import torch
+import pytest
+
+
+def _first_distinct_match_ids(all_match_ids, count=2):
+    out = []
+    for mid in all_match_ids:
+        if mid not in out:
+            out.append(mid)
+        if len(out) == count:
+            return out
+    pytest.skip(f"need at least {count} distinct fixture matches")
 
 
 def test_build_static_only_index_returns_one_row_per_anchor(fixture_match_id):
@@ -39,3 +50,35 @@ def test_build_static_only_index_excludes(fixture_match_id):
         device="cpu",
     )
     assert bundle.corpus_white.shape[0] == 0
+
+
+def test_build_static_only_index_batched_matches_single_game_order(all_match_ids):
+    from model.baselines.static_only_index import build_static_only_index
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+    match_ids = _first_distinct_match_ids(all_match_ids, count=2)
+    idx = build_puuid_index(match_ids)
+    torch.manual_seed(0)
+    model = PlanBModel(max_puuids=len(idx) + 1)
+
+    single = build_static_only_index(
+        model=model,
+        train_match_ids=match_ids,
+        exclude_match_ids=set(),
+        puuid_index=idx,
+        device="cpu",
+        batch_size=1,
+    )
+    batched = build_static_only_index(
+        model=model,
+        train_match_ids=match_ids,
+        exclude_match_ids=set(),
+        puuid_index=idx,
+        device="cpu",
+        batch_size=2,
+    )
+
+    assert batched.row_match_id == single.row_match_id
+    assert torch.equal(batched.row_anchor_minute, single.row_anchor_minute)
+    assert torch.equal(batched.row_blue_win, single.row_blue_win)
+    assert torch.allclose(batched.corpus_white, single.corpus_white, atol=1e-6)

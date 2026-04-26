@@ -40,6 +40,34 @@ JS_DIVERGENCE_SIGNAL_THRESHOLD: float = 5e-4
 # spacing, enough to surface divergence without blowing runtime.
 DEFAULT_ROLLOUT_STEPS: int = 4
 
+PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT = (
+    "PlanBModel.forward and rollout_prior_single sample RSSM latents; the "
+    "intervention scan keeps teacher-force forwards and rollouts one game/"
+    "anchor at a time until deterministic or RNG-replay parity is specified."
+)
+
+
+def _inc_counter(counters: dict | None, name: str, amount: int = 1) -> None:
+    if counters is None:
+        return
+    counters[name] = int(counters.get(name, 0)) + amount
+
+
+def _record_model_forward_counter(counters: dict | None, batch: dict) -> None:
+    if counters is None:
+        return
+    _inc_counter(counters, "model_forward_calls")
+    batch_size = 1
+    tokens = batch.get("tokens")
+    if torch.is_tensor(tokens):
+        batch_size = int(tokens.size(0))
+    counters["max_model_forward_batch_size"] = max(
+        int(counters.get("max_model_forward_batch_size", 0)),
+        batch_size,
+    )
+    counters.setdefault("stochastic_planb_forward_batching", "disabled_batch_size_1")
+    counters.setdefault("stochastic_planb_forward_caveat", PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT)
+
 
 def _band_label(band_id: int) -> str:
     if band_id == UNRANKED_BAND or not (0 <= band_id < len(BAND_NAMES)):
@@ -48,7 +76,7 @@ def _band_label(band_id: int) -> str:
 
 
 @torch.no_grad()
-def _encode_one_game(model, batch) -> dict:
+def _encode_one_game(model, batch, *, counters: dict | None = None) -> dict:
     """Run a forward pass and pull tensors needed by ``rollout_prior_single``.
 
     Returns a dict with: ``h``, ``z``, ``static_tokens``, ``token_embeddings``,
@@ -56,6 +84,7 @@ def _encode_one_game(model, batch) -> dict:
     ``n_valid_anchors``, ``rank_band``.
     """
     out = model(batch)
+    _record_model_forward_counter(counters, batch)
     anchor_pos = batch["anchor_positions"][0]
     ts = batch["token_timestamps"][0]
     anchor_ts = ts.gather(0, anchor_pos.long())
@@ -87,6 +116,7 @@ def _score_anchor(
     synthetic_embs: dict[str, torch.Tensor],
     replace_window: bool = True,
     sustained: bool = True,
+    counters: dict | None = None,
 ) -> dict[str, float]:
     """Per-decision-type JS divergence at one anchor.
 
@@ -108,6 +138,7 @@ def _score_anchor(
         n_steps=n_steps,
         n_valid_anchors=encoded["n_valid_anchors"],
     )
+    _inc_counter(counters, "base_rollout_calls")
     if not base:
         return {}
     scores: dict[str, float] = {}
@@ -130,6 +161,7 @@ def _score_anchor(
             replace_window=replace_window,
             sustained=sustained,
         )
+        _inc_counter(counters, "intervention_rollout_calls")
         scores[dt] = js_divergence(base, perturbed, model)
     return scores
 
@@ -175,10 +207,11 @@ def run_intervention_scan(
     candidates: list[dict] = []
     n_games_scanned = 0
     n_anchors_scored = 0
+    counters: dict = {}
 
     for batch in loader:
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-        encoded = _encode_one_game(model, batch)
+        encoded = _encode_one_game(model, batch, counters=counters)
         band_label = _band_label(encoded["rank_band"])
         minutes_cpu = encoded["minutes"].cpu()
 
@@ -196,6 +229,7 @@ def run_intervention_scan(
                 n_steps=n_steps, synthetic_embs=synthetic_embs,
                 replace_window=replace_window,
                 sustained=sustained,
+                counters=counters,
             )
             if not scores:
                 continue
@@ -244,10 +278,18 @@ def run_intervention_scan(
         "candidates": candidates,
         "gate_d_pass": gate_d_pass,
         "rank_band_counts": band_counts,
+        "stochastic_eval_gate": {
+            "planb_forward_batching": "disabled_batch_size_1",
+            "reason": PLANB_STOCHASTIC_EVAL_BATCHING_CAVEAT,
+        },
         "summary": {
             "n_games_scanned": n_games_scanned,
             "n_anchors_scored": n_anchors_scored,
             "n_candidates": len(candidates),
+            "n_model_forward_calls": int(counters.get("model_forward_calls", 0)),
+            "n_base_rollouts": int(counters.get("base_rollout_calls", 0)),
+            "n_intervention_rollouts": int(counters.get("intervention_rollout_calls", 0)),
+            "max_model_forward_batch_size": int(counters.get("max_model_forward_batch_size", 0)),
             "median_divergence": float(median),
             "n_above_signal": int(n_above_signal),
             "n_above_floor": int(n_above_floor),

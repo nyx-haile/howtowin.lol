@@ -5,11 +5,13 @@ import torch
 
 from model.rank_diagnostics import (
     BAND_NAMES,
+    DiagnoseConfig,
     N_BANDS,
     _game_band,
     _player_band,
     _tier_to_band_tensor,
     classify_rank_use,
+    collect_activations_and_collapse,
     fit_shallow_probe,
     write_rank_diagnosis_artifact,
 )
@@ -156,3 +158,93 @@ def test_write_rank_diagnosis_artifact_round_trip(tmp_path):
     assert data["classification"] == "under_use"
     assert data["gate_b_pass"] is True
     assert data["probe_auc_by_layer"]["h_t"] == 0.54
+
+
+def test_collect_activations_records_single_game_forward_gate():
+    from model.dataset import FRAME_FEAT_DIM, MACRO_FEAT_DIM
+    from model.player_features import PLAYER_FEATURE_DIM
+    from model.static_features import STATIC_VECTOR_DIM
+    from model.tokens import EVENT_TYPE_TO_ID
+
+    n_anchors = 3
+    n_tokens = 4
+    token_ids = list(EVENT_TYPE_TO_ID.values())
+    ds = [{
+        "static": torch.zeros(STATIC_VECTOR_DIM, dtype=torch.float32),
+        "players": torch.zeros(10, PLAYER_FEATURE_DIM, dtype=torch.float32),
+        "player_ids": torch.zeros(10, dtype=torch.long),
+        "tokens": torch.tensor(token_ids[:n_tokens], dtype=torch.long),
+        "token_actors": torch.zeros(n_tokens, dtype=torch.long),
+        "token_targets": torch.zeros(n_tokens, dtype=torch.long),
+        "token_timestamps": torch.arange(n_tokens, dtype=torch.float32) * 60000.0,
+        "token_item_ids": torch.zeros(n_tokens, dtype=torch.long),
+        "token_skill_slots": torch.zeros(n_tokens, dtype=torch.long),
+        "token_monster_types": torch.zeros(n_tokens, dtype=torch.long),
+        "token_monster_subtypes": torch.zeros(n_tokens, dtype=torch.long),
+        "token_building_types": torch.zeros(n_tokens, dtype=torch.long),
+        "token_lane_types": torch.zeros(n_tokens, dtype=torch.long),
+        "token_tower_types": torch.zeros(n_tokens, dtype=torch.long),
+        "token_ward_types": torch.zeros(n_tokens, dtype=torch.long),
+        "anchor_positions": np.arange(n_anchors, dtype=np.int64),
+        "frame_features": np.zeros((n_anchors, 10, FRAME_FEAT_DIM), dtype=np.float32),
+        "anchor_macro_features": np.zeros((n_anchors, MACRO_FEAT_DIM), dtype=np.float32),
+        "decision_labels": np.zeros((n_anchors, 10), dtype=np.int64),
+        "next_event_type_labels": np.ones(n_anchors, dtype=np.int64),
+        "next_event_actor_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_target_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_item_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_skill_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_monster_type_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_monster_subtype_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_building_type_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_lane_type_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_tower_type_labels": np.zeros(n_anchors, dtype=np.int64),
+        "next_event_ward_type_labels": np.zeros(n_anchors, dtype=np.int64),
+        "window_positions": [np.array([i], dtype=np.int64) for i in range(n_anchors)],
+        "outcome": 1.0,
+    }]
+
+    class _Model:
+        training = True
+
+        def eval(self):
+            self.training = False
+            return self
+
+        def train(self, mode: bool = True):
+            self.training = mode
+            return self
+
+        def player_enc(self, players, player_ids):
+            return torch.zeros(players.shape[0], players.shape[1], 4)
+
+        def __call__(self, batch):
+            bsz, n = batch["anchor_mask"].shape
+            return {
+                "anchor_mask": batch["anchor_mask"],
+                "h": torch.zeros(bsz, n, 4),
+                "post_mu": torch.zeros(bsz, n, 3),
+                "post_logvar": torch.zeros(bsz, n, 3),
+                "prior_mu": torch.ones(bsz, n, 3) * 0.1,
+                "prior_logvar": torch.zeros(bsz, n, 3),
+            }
+
+    model = _Model()
+    counters = {}
+
+    collect_activations_and_collapse(
+        model,
+        ds,
+        config=DiagnoseConfig(
+            device="cpu",
+            max_anchors_per_layer=8,
+            sample_games=1,
+            swap_sample=1,
+        ),
+        counters=counters,
+    )
+
+    assert counters["collect_model_forward_calls"] == 1
+    assert counters["model_forward_calls"] == 1
+    assert counters["max_model_forward_batch_size"] == 1
+    assert counters["stochastic_planb_forward_batching"] == "disabled_batch_size_1"

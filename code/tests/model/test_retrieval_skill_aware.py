@@ -1,6 +1,7 @@
 """Tests for Step 3 / Gate C skill-aware retrieval."""
 import torch
 
+import model.retrieval as retrieval
 from model.retrieval import (
     IndexBundle,
     KEY_DIM,
@@ -28,6 +29,106 @@ def _mk_bundle(*, N: int, band_values: list[int], seed: int = 0) -> IndexBundle:
         row_rank_band=torch.tensor(band_values, dtype=torch.int8),
         schema_version=SCHEMA_VERSION,
     ), corpus_raw
+
+
+def _legacy_query_index_skill_aware(
+    bundle: IndexBundle,
+    queries_raw: torch.Tensor,
+    *,
+    k: int,
+    query_rank_bands: torch.Tensor,
+    min_effective_k: int,
+    out_of_band_penalty: float = 1.25,
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """Reference copy of the pre-short-circuit per-k semantics.
+
+    The optimization under test may skip fallback stage ``topk`` calls only
+    when the chosen same-stage result is provably unchanged.
+    """
+    corpus = bundle.corpus_white
+    row_band = bundle.row_rank_band.to(torch.long)
+    valid_row = row_band >= 0
+    inv_valid = (~valid_row).unsqueeze(0)
+    not_excluded = torch.ones(1, corpus.shape[0], dtype=torch.bool)
+
+    qb_white = bundle.whitener.apply(queries_raw.to(dtype=corpus.dtype))
+    d_full = torch.cdist(qb_white, corpus)
+    q_band = query_rank_bands.to(dtype=torch.long)
+    unranked_q = (q_band < 0).unsqueeze(1)
+    diff = (row_band.unsqueeze(0) - q_band.unsqueeze(1)).abs()
+
+    same_mask = unranked_q | inv_valid | (diff == 0)
+    adj_mask = unranked_q | inv_valid | (diff <= 1)
+    same_elig = same_mask & not_excluded
+    adj_elig = adj_mask & not_excluded
+
+    penalty_t = torch.tensor(out_of_band_penalty, dtype=torch.float32)
+    penalty_pow = torch.pow(penalty_t, diff.to(d_full.dtype))
+    ones = torch.ones_like(penalty_pow)
+    dist_penalty = torch.where(
+        valid_row.unsqueeze(0).expand_as(penalty_pow), penalty_pow, ones,
+    )
+    dist_penalty = torch.where(unranked_q.expand_as(penalty_pow), ones, dist_penalty)
+
+    d_same = torch.where(same_elig, d_full, torch.full_like(d_full, float("inf")))
+    d_adj = torch.where(adj_elig, d_full, torch.full_like(d_full, float("inf")))
+    d_unr = torch.where(not_excluded.expand_as(d_full), d_full * dist_penalty, torch.full_like(d_full, float("inf")))
+
+    d_same_top, idx_same_top = d_same.topk(k, dim=1, largest=False)
+    d_adj_top, idx_adj_top = d_adj.topk(k, dim=1, largest=False)
+    d_unr_top, idx_unr_top = d_unr.topk(k, dim=1, largest=False)
+
+    eff_k = same_mask.sum(dim=1).to(torch.long)
+    same_kept = torch.clamp(same_elig.sum(dim=1), max=k)
+    adj_kept = torch.clamp(adj_elig.sum(dim=1), max=k)
+    ranked_q = ~unranked_q.squeeze(1)
+    escalate_to_adj = ranked_q & (same_kept < min_effective_k)
+    escalate_to_unr = escalate_to_adj & (adj_kept < min_effective_k)
+    stage = torch.where(
+        escalate_to_unr,
+        torch.full_like(escalate_to_unr, 2, dtype=torch.long),
+        torch.where(
+            escalate_to_adj,
+            torch.full_like(escalate_to_adj, 1, dtype=torch.long),
+            torch.full_like(ranked_q, 0, dtype=torch.long),
+        ),
+    )
+
+    stage_exp = stage.unsqueeze(1).expand(-1, k)
+    chosen_idx = torch.where(
+        stage_exp == 2,
+        idx_unr_top,
+        torch.where(stage_exp == 1, idx_adj_top, idx_same_top),
+    )
+    chosen_d = torch.where(
+        stage_exp == 2,
+        d_unr_top,
+        torch.where(stage_exp == 1, d_adj_top, d_same_top),
+    )
+
+    if torch.isinf(chosen_d).any():
+        d_full_top, idx_full_top = d_full.topk(min(k, corpus.shape[0]), dim=1, largest=False)
+        if d_full_top.shape[1] < k:
+            pad = k - d_full_top.shape[1]
+            d_full_top = torch.cat([d_full_top, d_full_top[:, -1:].expand(-1, pad)], dim=1)
+            idx_full_top = torch.cat([idx_full_top, idx_full_top[:, -1:].expand(-1, pad)], dim=1)
+        inf_row = torch.isinf(chosen_d).any(dim=1)
+        chosen_idx = torch.where(inf_row.unsqueeze(1), idx_full_top, chosen_idx)
+        chosen_d = torch.where(inf_row.unsqueeze(1), d_full_top, chosen_d)
+        stage = torch.where(inf_row, torch.full_like(stage, 2), stage)
+
+    chosen_band = row_band[chosen_idx]
+    in_band = (chosen_band == q_band.unsqueeze(1)).to(torch.float32).mean(dim=1)
+    in_band = torch.where(
+        unranked_q.squeeze(1),
+        torch.full_like(in_band, float("nan")),
+        in_band,
+    )
+    return chosen_idx, chosen_d, {
+        "effective_k_per_query": eff_k,
+        "widening_stage_per_query": stage,
+        "in_band_fraction_per_query": in_band,
+    }
 
 
 def test_skill_aware_query_raises_without_rank_metadata():
@@ -72,6 +173,106 @@ def test_skill_aware_same_band_when_enough_rows():
     # 100% of returned rows should be in band 0.
     assert float(info["in_band_fraction_per_query"][0].item()) == 1.0
     assert (bundle.row_rank_band[idx[0]] == 0).all().item()
+
+
+def test_skill_aware_same_only_batch_skips_fallback_topk(monkeypatch):
+    bands = [0] * 80 + [3] * 80
+    bundle, corpus_raw = _mk_bundle(N=160, band_values=bands)
+
+    calls: list[int] = []
+    original_topk = retrieval._topk_smallest
+
+    def counted_topk(d: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+        calls.append(k)
+        return original_topk(d, k)
+
+    monkeypatch.setattr(retrieval, "_topk_smallest", counted_topk)
+    idx, _d, info = retrieval.query_index_skill_aware(
+        bundle, corpus_raw[:2], k=32,
+        query_rank_bands=torch.tensor([0, 0], dtype=torch.long),
+        min_effective_k=32,
+        batch_size=8,
+    )
+
+    assert idx.shape == (2, 32)
+    assert info["widening_stage_per_query"].tolist() == [0, 0]
+    assert len(calls) == 1
+
+
+def test_skill_aware_matches_legacy_semantics_on_mixed_batch():
+    bands = [0] * 40 + [2] * 10 + [4] * 80 + [-1] * 2
+    bundle, corpus_raw = _mk_bundle(N=132, band_values=bands)
+    q_raw = torch.cat([
+        corpus_raw[0:1],    # band-0 query: same stage
+        corpus_raw[50:51],  # synthetic band-1 query: adjacent stage
+        corpus_raw[40:41],  # band-2 query: unrestricted stage
+        corpus_raw[0:1],    # unranked query: wildcard same stage
+    ], dim=0)
+    q_band = torch.tensor([0, 1, 2, -1], dtype=torch.long)
+
+    actual_idx, actual_d, actual_info = query_index_skill_aware(
+        bundle, q_raw, k=32, query_rank_bands=q_band,
+        min_effective_k=32, batch_size=4,
+    )
+    expected_idx, expected_d, expected_info = _legacy_query_index_skill_aware(
+        bundle, q_raw, k=32, query_rank_bands=q_band,
+        min_effective_k=32,
+    )
+
+    assert torch.equal(actual_idx, expected_idx)
+    assert torch.allclose(actual_d, expected_d)
+    assert torch.equal(
+        actual_info["effective_k_per_query"],
+        expected_info["effective_k_per_query"],
+    )
+    assert actual_info["widening_stage_per_query"].tolist() == [0, 1, 2, 0]
+    assert torch.equal(
+        actual_info["widening_stage_per_query"],
+        expected_info["widening_stage_per_query"],
+    )
+    assert torch.allclose(
+        actual_info["in_band_fraction_per_query"],
+        expected_info["in_band_fraction_per_query"],
+        equal_nan=True,
+    )
+
+
+def test_skill_aware_k_below_min_effective_preserves_unrestricted_stage():
+    bands = [0] * 80 + [3] * 80
+    bundle, corpus_raw = _mk_bundle(N=160, band_values=bands)
+    idx, d, info = query_index_skill_aware(
+        bundle, corpus_raw[0:1], k=16,
+        query_rank_bands=torch.tensor([0], dtype=torch.long),
+        min_effective_k=32,
+    )
+    expected_idx, expected_d, expected_info = _legacy_query_index_skill_aware(
+        bundle, corpus_raw[0:1], k=16,
+        query_rank_bands=torch.tensor([0], dtype=torch.long),
+        min_effective_k=32,
+    )
+
+    assert int(info["widening_stage_per_query"][0].item()) == 2
+    assert torch.equal(idx, expected_idx)
+    assert torch.allclose(d, expected_d)
+    assert torch.equal(
+        info["effective_k_per_query"],
+        expected_info["effective_k_per_query"],
+    )
+
+
+def test_skill_aware_unranked_corpus_rows_are_same_stage_wildcards():
+    bands = [0] * 30 + [-1] * 2 + [3] * 100
+    bundle, corpus_raw = _mk_bundle(N=132, band_values=bands)
+    idx, _d, info = query_index_skill_aware(
+        bundle, corpus_raw[0:1], k=32,
+        query_rank_bands=torch.tensor([0], dtype=torch.long),
+        min_effective_k=32,
+    )
+
+    chosen_bands = bundle.row_rank_band[idx[0]]
+    assert int(info["widening_stage_per_query"][0].item()) == 0
+    assert int(info["effective_k_per_query"][0].item()) == 32
+    assert int((chosen_bands == -1).sum().item()) == 2
 
 
 def test_skill_aware_widens_to_adjacent_when_same_band_too_small():

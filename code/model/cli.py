@@ -544,7 +544,20 @@ def cmd_retrieval_eval(args):
     exclude = set(val) | set(cold)
     puuid_index = build_puuid_index(train, max_puuids=max_puuids)
 
-    device = "cuda" if _t.cuda.is_available() else "cpu"
+    cuda_available = _t.cuda.is_available()
+    device = args.device or ("cuda" if cuda_available else "cpu")
+    if str(device).startswith("cuda") and not cuda_available:
+        raise SystemExit(
+            f"retrieval-eval requested device={device!r}, but CUDA is not available"
+        )
+    if args.query_batch_size <= 0:
+        raise SystemExit("--query-batch-size must be a positive integer")
+    print(
+        "[retrieval-eval] "
+        f"device={device} cuda_available={cuda_available} "
+        f"query_batch_size={args.query_batch_size}"
+    )
+
     model = PlanBModel(max_puuids=max_puuids).to(device)
     model.load_state_dict(ckpt["state_dict"])
 
@@ -563,7 +576,7 @@ def cmd_retrieval_eval(args):
             puuid_index=puuid_index, exclude_match_ids=exclude,
             k_sweep=K_SWEEP, headline_k=HEADLINE_K,
             headline_minutes=MID_GAME_MINUTES,
-            device=device, query_batch_size=128,
+            device=device, query_batch_size=args.query_batch_size,
             run_baselines=args.baselines,
             static_only_bundle=so_bundle,
             frame_features_bundle=ff_bundle,
@@ -793,6 +806,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_re = sub.add_parser("retrieval-eval")
     p_re.add_argument("--baselines", action="store_true",
                       help="also evaluate baselines (requires --baselines on build)")
+    p_re.add_argument(
+        "--device",
+        default=None,
+        help="Eval device (default: cuda when available, otherwise cpu).",
+    )
+    p_re.add_argument(
+        "--query-batch-size", type=int, default=128, dest="query_batch_size",
+        help="Number of query keys per exact cdist/topk batch.",
+    )
 
     p_ls = sub.add_parser("lesson", help="Generate lesson-anchor candidates for one game")
     p_ls.add_argument("--match-id", required=True, dest="match_id")
