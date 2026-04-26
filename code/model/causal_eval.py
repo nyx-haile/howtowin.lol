@@ -51,13 +51,57 @@ def _t_stat(effect: float, se: float) -> float:
     return float(effect / se)
 
 
-def _matching_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray) -> dict:
-    """Propensity-score 1-NN ATT.
+def _cluster_meat(scores: np.ndarray, clusters: Optional[np.ndarray]) -> float:
+    """Sum of squared cluster-sums of ``scores``.
 
-    Fits a logistic propensity model on all rows, then for each treated row
-    finds the nearest control by absolute propensity difference. Returns the
-    ATT, a paired-difference SE, and an overlap diagnostic (fraction of rows
-    with propensity in ``[trim, 1-trim]``).
+    With ``clusters=None`` reduces to ``sum(scores ** 2)``, the IID middle
+    term. The point of clustering is to absorb within-cluster outcome
+    correlation that would otherwise deflate SEs.
+    """
+    if clusters is None:
+        return float((scores ** 2).sum())
+    unique = np.unique(clusters)
+    total = 0.0
+    for c in unique:
+        s = float(scores[clusters == c].sum())
+        total += s * s
+    return float(total)
+
+
+def _cross_fit_propensity(X: np.ndarray, T: np.ndarray, K: int = 5,
+                          random_state: int = 2) -> np.ndarray:
+    """Out-of-fold propensity ``P(T=1|X)`` for matching/AIPW overlap.
+
+    In-sample propensities overfit on high-D ``[h_t || mu_q(z_t) || macro]``
+    covariates and inflate the overlap diagnostic. Cross-fitting fixes this
+    at small extra cost (one logistic per fold).
+    """
+    n = len(T)
+    p = np.zeros(n, dtype=np.float64)
+    if n < 2 * K:
+        # Fall back to in-sample if data too small to fold.
+        lr = LogisticRegression(max_iter=500, solver="liblinear")
+        lr.fit(X, T)
+        return lr.predict_proba(X)[:, 1]
+    kf = KFold(n_splits=K, shuffle=True, random_state=random_state)
+    for tr, te in kf.split(X):
+        lr = LogisticRegression(max_iter=500, solver="liblinear")
+        lr.fit(X[tr], T[tr])
+        p[te] = lr.predict_proba(X[te])[:, 1]
+    return p
+
+
+def _matching_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
+                        cluster_ids: Optional[np.ndarray] = None) -> dict:
+    """Propensity-score 1-NN ATT with cross-fit propensity.
+
+    The propensity is fit out-of-fold so the overlap diagnostic and the NN
+    distances aren't optimistic. Matching is with replacement (a control
+    can match many treated rows), so the paired-difference SE strictly
+    understates the true matching variance — the Abadie-Imbens (2006)
+    correction is not applied here. ``cluster_ids`` (one per row) absorbs
+    within-game outcome correlation by clustering the paired-difference
+    SE on the treated rows' clusters.
     """
     n_t = int((T == 1).sum())
     n_c = int((T == 0).sum())
@@ -65,9 +109,7 @@ def _matching_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray) -> dict:
         return {"effect": 0.0, "se": float("inf"), "overlap": 0.0,
                 "n_treated": n_t, "n_control": n_c}
 
-    lr = LogisticRegression(max_iter=500, solver="liblinear")
-    lr.fit(X, T)
-    p = lr.predict_proba(X)[:, 1]
+    p = _cross_fit_propensity(X, T)
     overlap = float(((p >= PROPENSITY_TRIM) & (p <= 1 - PROPENSITY_TRIM)).mean())
 
     treated_idx = np.where(T == 1)[0]
@@ -76,9 +118,16 @@ def _matching_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray) -> dict:
     nn = np.argmin(diffs, axis=1)
     matched_y = Y[control_idx[nn]]
     paired = Y[treated_idx] - matched_y
-    se = float(paired.std(ddof=1) / np.sqrt(n_t)) if n_t > 1 else float("inf")
+    effect = float(paired.mean())
+
+    treated_clusters = (
+        cluster_ids[treated_idx] if cluster_ids is not None else None
+    )
+    centered = paired - effect
+    meat = _cluster_meat(centered, treated_clusters)
+    se = float(np.sqrt(meat) / n_t) if n_t > 0 else float("inf")
     return {
-        "effect": float(paired.mean()),
+        "effect": effect,
         "se": se,
         "overlap": overlap,
         "n_treated": n_t,
@@ -101,8 +150,14 @@ def _fit_outcome_arm(X_tr: np.ndarray, Y_tr: np.ndarray, T_tr: np.ndarray, arm: 
     return m
 
 
-def _dr_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray, K: int = 5) -> dict:
-    """AIPW (doubly robust) ATE with K-fold cross-fitting."""
+def _dr_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
+                  cluster_ids: Optional[np.ndarray] = None, K: int = 5) -> dict:
+    """AIPW (doubly robust) ATE with K-fold cross-fitting.
+
+    ``cluster_ids`` (one per row) gives a cluster-robust SE for the
+    influence-function score ``psi``; without it, the SE is the IID
+    ``psi.std/√n``.
+    """
     n = len(Y)
     if n < 2 * K:
         return {"effect": 0.0, "se": float("inf")}
@@ -121,14 +176,20 @@ def _dr_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray, K: int = 5) -> di
             + T[te] * (Y[te] - m1_te) / p_te
             - (1 - T[te]) * (Y[te] - m0_te) / (1 - p_te)
         )
-    return {
-        "effect": float(psi.mean()),
-        "se": float(psi.std(ddof=1) / np.sqrt(n)),
-    }
+    effect = float(psi.mean())
+    centered = psi - effect
+    meat = _cluster_meat(centered, cluster_ids)
+    se = float(np.sqrt(meat) / n) if n > 0 else float("inf")
+    return {"effect": effect, "se": se}
 
 
-def _dml_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray, K: int = 5) -> dict:
-    """DML (Robinson partialling-out) ATE with K-fold cross-fitting."""
+def _dml_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
+                   cluster_ids: Optional[np.ndarray] = None, K: int = 5) -> dict:
+    """DML (Robinson partialling-out) ATE with K-fold cross-fitting.
+
+    Cluster-robust sandwich: the meat term ``sum (T_res * resid)²`` is
+    replaced with the sum of squared cluster-sums of ``T_res * resid``.
+    """
     n = len(Y)
     if n < 2 * K:
         return {"effect": 0.0, "se": float("inf")}
@@ -145,30 +206,46 @@ def _dml_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray, K: int = 5) -> d
         return {"effect": 0.0, "se": float("inf")}
     theta = float((T_res * Y_res).sum() / denom)
     resid = Y_res - theta * T_res
-    var = float(((T_res ** 2) * (resid ** 2)).sum() / (denom ** 2))
+    score = T_res * resid
+    meat = _cluster_meat(score, cluster_ids)
+    var = meat / (denom ** 2)
     return {"effect": theta, "se": float(np.sqrt(max(var, 0.0)))}
 
 
 def _agreement(estimates: list[dict]) -> tuple[bool, str]:
-    """Three estimators agree on sign OR none significantly contradicts.
+    """Acceptance rule for the three estimators.
 
-    "Significant contradiction" = an estimator with opposite sign to the
-    majority direction whose ``|t| = |effect|/se`` exceeds ``SIGNIFICANCE_T``.
+    Two checks must both pass:
+
+    1. **No significant contradiction.** An estimator with opposite sign to
+       the majority direction and ``|t| > SIGNIFICANCE_T`` rejects the pair.
+    2. **Positive evidence.** At least one estimator must reach
+       ``|t| >= SIGNIFICANCE_T``. Without this, "the three estimators
+       happen to agree on a direction by chance" — a noisy null — would
+       count as a Gate E pass. The plan's "agree on direction OR do not
+       contradict" is meant to *not reject* such pairs on disagreement
+       grounds; it is not meant to *accept* them as validated.
     """
     signs = [int(np.sign(e["effect"])) for e in estimates]
     nonzero = {s for s in signs if s != 0}
-    if len(nonzero) <= 1:
-        return True, "agree"
 
-    pos = sum(1 for s in signs if s > 0)
-    neg = sum(1 for s in signs if s < 0)
-    majority = 1 if pos >= neg else -1
-    for est, s in zip(estimates, signs):
-        if s == -majority:
-            t = abs(_t_stat(est["effect"], est.get("se", 0.0)))
-            if t > SIGNIFICANCE_T:
-                return False, f"estimator contradicts (t={t:.2f})"
-    return True, "no significant contradiction"
+    if len(nonzero) > 1:
+        pos = sum(1 for s in signs if s > 0)
+        neg = sum(1 for s in signs if s < 0)
+        majority = 1 if pos >= neg else -1
+        for est, s in zip(estimates, signs):
+            if s == -majority:
+                t = abs(_t_stat(est["effect"], est.get("se", 0.0)))
+                if t > SIGNIFICANCE_T:
+                    return False, f"estimator contradicts (t={t:.2f})"
+
+    max_t = max(
+        abs(_t_stat(e["effect"], e.get("se", 0.0))) for e in estimates
+    )
+    if max_t < SIGNIFICANCE_T:
+        return False, f"underpowered (max|t|={max_t:.2f} < {SIGNIFICANCE_T})"
+
+    return True, "agree" if len(nonzero) <= 1 else "no significant contradiction"
 
 
 def _confidence(estimates: list[dict]) -> float:
@@ -188,7 +265,13 @@ def _confidence(estimates: list[dict]) -> float:
 
 
 def evaluate_pair(rows: list[dict], dt: str, minute: int) -> dict:
-    """Run all three estimators for one (decision_type, anchor_minute) pair."""
+    """Run all three estimators for one (decision_type, anchor_minute) pair.
+
+    Cluster-robust SEs are computed on ``game_idx`` when present in rows.
+    The blue/red row pair for a single (game, anchor) has perfectly
+    anti-correlated outcomes; without clustering, the IID SE underestimates
+    the true variance roughly by ``√2``.
+    """
     sel = [r for r in rows if r["minute"] == minute]
     if not sel:
         return {"accept": False, "reason": "no rows at this minute",
@@ -197,6 +280,10 @@ def evaluate_pair(rows: list[dict], dt: str, minute: int) -> dict:
     X = np.stack([r["x"] for r in sel]).astype(np.float64, copy=False)
     T = np.array([r["treatments"][dt] for r in sel], dtype=np.int64)
     Y = np.array([r["outcome"] for r in sel], dtype=np.float64)
+    cluster_ids = (
+        np.array([r["game_idx"] for r in sel], dtype=np.int64)
+        if all("game_idx" in r for r in sel) else None
+    )
 
     n_t = int((T == 1).sum())
     n_c = int((T == 0).sum())
@@ -207,7 +294,7 @@ def evaluate_pair(rows: list[dict], dt: str, minute: int) -> dict:
             "diagnostics": {"n_treated": n_t, "n_control": n_c},
         }
 
-    matching = _matching_estimator(X, T, Y)
+    matching = _matching_estimator(X, T, Y, cluster_ids=cluster_ids)
     if matching["overlap"] < OVERLAP_FLOOR:
         return {
             "accept": False,
@@ -215,14 +302,29 @@ def evaluate_pair(rows: list[dict], dt: str, minute: int) -> dict:
             "diagnostics": {"matching": matching, "n_treated": n_t, "n_control": n_c},
         }
 
-    dr = _dr_estimator(X, T, Y)
-    dml = _dml_estimator(X, T, Y)
+    dr = _dr_estimator(X, T, Y, cluster_ids=cluster_ids)
+    dml = _dml_estimator(X, T, Y, cluster_ids=cluster_ids)
     agree, reason = _agreement([matching, dr, dml])
     confidence = _confidence([matching, dr, dml])
+    max_t = max(
+        abs(_t_stat(e["effect"], e.get("se", 0.0)))
+        for e in (matching, dr, dml)
+    )
     return {
         "accept": bool(agree),
         "reason": reason,
         "confidence": confidence,
+        "max_t_stat": max_t,
+        "effects": {
+            "matching": float(matching["effect"]),
+            "dr": float(dr["effect"]),
+            "dml": float(dml["effect"]),
+        },
+        "ses": {
+            "matching": float(matching["se"]),
+            "dr": float(dr["se"]),
+            "dml": float(dml["se"]),
+        },
         "diagnostics": {
             "matching": matching,
             "dr": dr,
@@ -379,10 +481,17 @@ def run_causal_filter(
             n_overlap_fail += 1
 
         if result["accept"]:
+            diag_n_t = diag.get("n_treated") if isinstance(diag, dict) else None
+            diag_n_c = diag.get("n_control") if isinstance(diag, dict) else None
             accepted.append({
                 "decision_type": dt,
                 "anchor_minute": minute,
                 "confidence": float(result.get("confidence", 0.0)),
+                "max_t_stat": float(result.get("max_t_stat", 0.0)),
+                "effects": result.get("effects", {}),
+                "ses": result.get("ses", {}),
+                "n_treated": int(diag_n_t) if diag_n_t is not None else None,
+                "n_control": int(diag_n_c) if diag_n_c is not None else None,
             })
             accepts_per_type[dt] += 1
         else:
@@ -395,12 +504,17 @@ def run_causal_filter(
     overlap_median = float(np.median(overlap_values)) if overlap_values else 0.0
     overlap_fail_rate = n_overlap_fail / len(pairs) if pairs else 1.0
     stop_condition = overlap_fail_rate > GATE_E_MAX_OVERLAP_FAIL_RATE
-    gate_e_pass = bool(
+    rank_bands_seen = sorted({r["rank_band"] for r in rows}) if rows else []
+
+    # Within-band: at least one accept and the filter isn't structurally
+    # overlap-bound. Cross-band: also requires evidence from ≥2 rank bands,
+    # otherwise the rank-confounding check is vacuous (B2 — verifier finding).
+    gate_e_pass_within_band = bool(
         len(accepted) >= GATE_E_MIN_ACCEPTS_TOTAL
         and not stop_condition
     )
+    gate_e_pass = bool(gate_e_pass_within_band and len(rank_bands_seen) >= 2)
 
-    rank_bands_seen = sorted({r["rank_band"] for r in rows}) if rows else []
     return {
         "_caveat": (
             "51k corpus rank distribution is heavily skewed (≈67% master_plus, "
@@ -413,6 +527,7 @@ def run_causal_filter(
         "accepted": accepted,
         "rejected": rejected,
         "gate_e_pass": gate_e_pass,
+        "gate_e_pass_within_band": gate_e_pass_within_band,
         "summary": {
             "n_pairs_evaluated": len(pairs),
             "n_accepted": len(accepted),

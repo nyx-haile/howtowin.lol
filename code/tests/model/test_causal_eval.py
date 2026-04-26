@@ -138,6 +138,19 @@ def test_agreement_significant_contradiction_rejects():
     assert "contradicts" in reason
 
 
+# --- 8b. _agreement: all estimators underpowered → reject --------------------
+
+def test_agreement_underpowered_rejects():
+    estimates = [
+        {"effect": 0.05, "se": 0.5},   # |t|=0.1
+        {"effect": 0.06, "se": 0.5},   # |t|=0.12
+        {"effect": 0.04, "se": 0.5},   # |t|=0.08
+    ]
+    agree, reason = _agreement(estimates)
+    assert not agree
+    assert "underpowered" in reason
+
+
 # --- 9. confidence: higher when effects are large relative to SE --------------
 
 def test_confidence_scales_with_t_stat():
