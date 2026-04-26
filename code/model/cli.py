@@ -259,6 +259,86 @@ def cmd_skill_retrieval_eval(args):
     )
 
 
+def cmd_intervention_scan(args):
+    """Step 4 / Gate D: counterfactual intervention scan.
+
+    Encodes a holdout sample, runs synthetic decision-token interventions
+    on the rollout input path, and writes
+    ``artifacts/intervention_candidates.json``.
+    """
+    import torch as _t
+
+    from model.plan_b_model import PlanBModel
+    from model.intervention_driver import (
+        run_intervention_scan, write_intervention_candidates_artifact,
+        DEFAULT_ROLLOUT_STEPS, JS_DIVERGENCE_FLOOR, JS_DIVERGENCE_SIGNAL_THRESHOLD,
+    )
+
+    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    if args.artifact_path:
+        artifact_path = args.artifact_path
+    else:
+        artifact_path = os.path.join(
+            os.path.dirname(__file__), "..", "..",
+            "artifacts", "intervention_candidates.json",
+        )
+
+    ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
+    max_puuids = ckpt.get("max_puuids", 20000)
+
+    train = load_split("train")
+    val = load_split("holdout")
+    cold = load_split("cold")
+    exclude = set(val) | set(cold)
+    puuid_index = build_puuid_index(train, max_puuids=max_puuids)
+
+    device = args.device or ("cuda" if _t.cuda.is_available() else "cpu")
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    if args.split == "game_cold":
+        ids = val
+    elif args.split == "player_cold":
+        ids = cold
+    else:
+        raise SystemExit(f"unknown split {args.split!r}")
+
+    print(
+        f"\n=== intervention-scan: {args.split} "
+        f"({len(ids)} games, max_games={args.max_games or 'all'}) ==="
+    )
+    result = run_intervention_scan(
+        model=model,
+        holdout_match_ids=ids,
+        puuid_index=puuid_index,
+        exclude_match_ids=exclude,
+        device=device,
+        n_steps=args.n_steps,
+        max_games=args.max_games,
+        max_anchors_per_game=args.max_anchors_per_game,
+        js_floor=args.js_floor,
+        js_signal=args.js_signal,
+    )
+    s = result["summary"]
+    print(
+        f"  scanned={s['n_games_scanned']} games · {s['n_anchors_scored']} anchors\n"
+        f"  candidates={s['n_candidates']}  median_div={s['median_divergence']:.4f}\n"
+        f"  >=floor({s['js_floor']:.3f}): {s['n_above_floor']}  "
+        f">=signal({s['js_signal']:.3f}): {s['n_above_signal']}"
+    )
+    print("  per-type max divergence:")
+    for dt, m in s["per_type_max"].items():
+        marker = " ✓" if m >= s["js_signal"] else " ·"
+        print(f"    {dt:<16s} {m:.4f}{marker}")
+
+    write_intervention_candidates_artifact(artifact_path, result)
+    print(
+        f"\n[intervention-scan] gate_d_pass={result['gate_d_pass']} "
+        f"artifact={artifact_path}"
+    )
+
+
 def cmd_diagnose_rank(args):
     """Step 2 / Gate B: rank-use diagnostics.
 
@@ -654,6 +734,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated holdout splits to evaluate (default: game_cold,player_cold).",
     )
 
+    p_iv = sub.add_parser(
+        "intervention-scan",
+        help="Step 4 / Gate D: counterfactual intervention scan",
+    )
+    p_iv.add_argument("--checkpoint", default=None, dest="checkpoint")
+    p_iv.add_argument("--artifact-path", default=None, dest="artifact_path")
+    p_iv.add_argument("--device", default=None)
+    p_iv.add_argument("--split", default="game_cold", choices=["game_cold", "player_cold"])
+    p_iv.add_argument("--n-steps", type=int, default=4, dest="n_steps")
+    p_iv.add_argument("--max-games", type=int, default=None, dest="max_games")
+    p_iv.add_argument(
+        "--max-anchors-per-game", type=int, default=4, dest="max_anchors_per_game",
+    )
+    p_iv.add_argument("--js-floor", type=float, default=1e-4, dest="js_floor")
+    p_iv.add_argument("--js-signal", type=float, default=5e-4, dest="js_signal")
+
     p_dr = sub.add_parser(
         "diagnose-rank",
         help="Step 2 / Gate B: shallow rank-band probes + swap/ablation + collapse monitors",
@@ -711,6 +807,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_diagnose_rank(args)
     elif args.cmd == "skill-retrieval-eval":
         cmd_skill_retrieval_eval(args)
+    elif args.cmd == "intervention-scan":
+        cmd_intervention_scan(args)
 
 
 if __name__ == "__main__":

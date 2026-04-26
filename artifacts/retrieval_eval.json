@@ -1,4 +1,5 @@
 {
+  "_caveat": "51k corpus rank distribution is heavily skewed (67% master_plus, 32% unranked, <1% combined for iron/silver/gold/diamond). For typical band-3 queries, same-band cohort already covers ~99% of corpus, so skill-aware retrieval is numerically indistinguishable from unrestricted here. Gate C passes the median_effective_k>=32 design criterion but does not discriminate skill-awareness in practice. Rebalance is deferred to the second corpus wave (cloud rebuild). Tracked in bd memory key plan-b-gate-c-step-3.",
   "auc_at_15": 0.8489073937181508,
   "config": {
     "auc_minute": 15,
