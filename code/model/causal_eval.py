@@ -304,11 +304,18 @@ def evaluate_pair(rows: list[dict], dt: str, minute: int) -> dict:
 
     dr = _dr_estimator(X, T, Y, cluster_ids=cluster_ids)
     dml = _dml_estimator(X, T, Y, cluster_ids=cluster_ids)
-    agree, reason = _agreement([matching, dr, dml])
-    confidence = _confidence([matching, dr, dml])
+    # Acceptance evidence is computed from DR + DML only. Matching's
+    # paired-difference SE understates true variance: with-replacement NN
+    # has uncorrected multiplicity (Abadie-Imbens 2006) and the cluster
+    # term sees only treated rows, missing cross-game control reuse. The
+    # matching point estimate is still emitted for cross-estimator sanity
+    # checks, but the gating |t|≥1.96 rule runs against DR / DML so it
+    # isn't paid for by an over-tight SE.
+    agree, reason = _agreement([dr, dml])
+    confidence = _confidence([dr, dml])
     max_t = max(
         abs(_t_stat(e["effect"], e.get("se", 0.0)))
-        for e in (matching, dr, dml)
+        for e in (dr, dml)
     )
     return {
         "accept": bool(agree),

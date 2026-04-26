@@ -3,368 +3,175 @@
   "accepted": [
     {
       "anchor_minute": 10,
-      "confidence": 1.3776171259306356,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.0752911241781266,
-        "dr": -0.04110729588219146,
-        "matching": -0.08643326039387308
-      },
-      "max_t_stat": 4.934675167932947,
-      "n_control": 64,
-      "n_treated": 914,
-      "ses": {
-        "dml": 0.06636185481243635,
-        "dr": 0.06335636383398068,
-        "matching": 0.01751549138543977
-      }
-    },
-    {
-      "anchor_minute": 10,
-      "confidence": 4.723811301895607,
+      "confidence": 3.0287140112394564,
       "decision_type": "SKILL_LEVEL_UP",
       "effects": {
-        "dml": 0.16683381042781634,
-        "dr": 0.24924227976401375,
+        "dml": 0.16684220033740313,
+        "dr": 0.2492401072641177,
         "matching": 0.29882604055496265
       },
-      "max_t_stat": 21.40622388516758,
+      "max_t_stat": 3.8769636612993916,
       "n_control": 41,
       "n_treated": 937,
       "ses": {
-        "dml": 0.07309274464206571,
-        "dr": 0.06428759352991463,
+        "dml": 0.07309174997176654,
+        "dr": 0.0642874499320386,
         "matching": 0.013959773669470954
       }
     },
     {
       "anchor_minute": 14,
-      "confidence": 1.3442265749983193,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.10739507655012581,
-        "dr": -0.060773349135076614,
-        "matching": -0.034972677595628415
-      },
-      "max_t_stat": 1.9757453847050244,
-      "n_control": 59,
-      "n_treated": 915,
-      "ses": {
-        "dml": 0.06852278464876463,
-        "dr": 0.06489738885587132,
-        "matching": 0.01770100432290762
-      }
-    },
-    {
-      "anchor_minute": 14,
-      "confidence": 2.042850991919806,
-      "decision_type": "SKILL_LEVEL_UP",
-      "effects": {
-        "dml": 0.12744022508439048,
-        "dr": 0.05600793211338575,
-        "matching": 0.16918103448275862
-      },
-      "max_t_stat": 10.681716344251138,
-      "n_control": 46,
-      "n_treated": 928,
-      "ses": {
-        "dml": 0.0758547709582769,
-        "dr": 0.0809230615118764,
-        "matching": 0.015838375503559526
-      }
-    },
-    {
-      "anchor_minute": 14,
-      "confidence": 1.7593377135762283,
+      "confidence": 2.2269645872558934,
       "decision_type": "ENGAGE",
       "effects": {
-        "dml": 0.13842093192262997,
-        "dr": 0.14805395477414457,
-        "matching": 0.10204081632653061
+        "dml": 0.13840250586659766,
+        "dr": 0.14805310924818033,
+        "matching": 0.061224489795918366
       },
-      "max_t_stat": 2.4013473426586893,
+      "max_t_stat": 2.401314244982281,
       "n_control": 925,
       "n_treated": 49,
       "ses": {
-        "dml": 0.0669757931328965,
-        "dr": 0.0616545354118677,
-        "matching": 0.09220032836962908
+        "dml": 0.06697548790740994,
+        "dr": 0.061655033095958996,
+        "matching": 0.08834368069013146
       }
     },
     {
       "anchor_minute": 18,
-      "confidence": 1.1506482231485364,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.01812867978290198,
-        "dr": -0.05404598623163826,
-        "matching": -0.10442260442260443
-      },
-      "max_t_stat": 5.895240123531958,
-      "n_control": 74,
-      "n_treated": 814,
-      "ses": {
-        "dml": 0.061544635981068,
-        "dr": 0.07421866085979871,
-        "matching": 0.017713036659148453
-      }
-    },
-    {
-      "anchor_minute": 18,
-      "confidence": 2.6898147416420306,
-      "decision_type": "SKILL_LEVEL_UP",
-      "effects": {
-        "dml": 0.10856452969073019,
-        "dr": 0.13991822548036495,
-        "matching": 0.1585518102372035
-      },
-      "max_t_stat": 8.584401503068554,
-      "n_control": 87,
-      "n_treated": 801,
-      "ses": {
-        "dml": 0.058511683534869824,
-        "dr": 0.07434294584566645,
-        "matching": 0.018469757056508607
-      }
-    },
-    {
-      "anchor_minute": 18,
-      "confidence": 1.1520229477275472,
+      "confidence": 1.6006896864746971,
       "decision_type": "RECALL",
       "effects": {
-        "dml": -0.07953847518730368,
-        "dr": -0.09301236092130466,
+        "dml": -0.07949512809042916,
+        "dr": -0.09298844588059031,
         "matching": 0.013422818791946308
       },
-      "max_t_stat": 1.9659425943226434,
+      "max_t_stat": 1.965302581711468,
       "n_control": 739,
       "n_treated": 149,
       "ses": {
-        "dml": 0.060448635749625265,
-        "dr": 0.04731183971999531,
+        "dml": 0.06044070668974395,
+        "dr": 0.04731507847489422,
         "matching": 0.05367177313914354
       }
     },
     {
       "anchor_minute": 22,
-      "confidence": 3.6958883947741237,
+      "confidence": 2.4789767338944277,
       "decision_type": "ITEM_PURCHASED",
       "effects": {
-        "dml": -0.17951312699258887,
-        "dr": -0.15457440057331037,
-        "matching": -0.23224043715846995
+        "dml": -0.17937629717297407,
+        "dr": -0.15466264774939828,
+        "matching": -0.2390710382513661
       },
-      "max_t_stat": 12.572197547675323,
+      "max_t_stat": 3.1697125638288255,
       "n_control": 84,
       "n_treated": 732,
       "ses": {
-        "dml": 0.056604230339769836,
-        "dr": 0.07815511866819667,
-        "matching": 0.01847254119876701
+        "dml": 0.05659071400351144,
+        "dr": 0.07815800725520049,
+        "matching": 0.018493500902137264
       }
     },
     {
       "anchor_minute": 22,
-      "confidence": 2.229791796438332,
+      "confidence": 1.782241951222826,
       "decision_type": "SKILL_LEVEL_UP",
       "effects": {
-        "dml": 0.11634119870159036,
-        "dr": 0.20469047550137595,
-        "matching": 0.12536023054755044
+        "dml": 0.11660599109194011,
+        "dr": 0.20474967182004206,
+        "matching": 0.14121037463976946
       },
-      "max_t_stat": 6.328637171363281,
+      "max_t_stat": 2.333464465130929,
       "n_control": 122,
       "n_treated": 694,
       "ses": {
-        "dml": 0.0500466346500431,
-        "dr": 0.13033938997592845,
-        "matching": 0.01980840853300901
+        "dml": 0.04997118783439345,
+        "dr": 0.13033859709211143,
+        "matching": 0.019366260844136046
       }
     },
     {
       "anchor_minute": 22,
-      "confidence": 1.0315809614319895,
+      "confidence": 1.4522790268320735,
       "decision_type": "ENGAGE",
       "effects": {
-        "dml": 0.1294171012908103,
-        "dr": 0.09073787494179605,
-        "matching": 0.0125
+        "dml": 0.12940580757088288,
+        "dr": 0.09071008178532049,
+        "matching": 0.1125
       },
-      "max_t_stat": 2.3248670260597737,
+      "max_t_stat": 2.324741841330065,
       "n_control": 736,
       "n_treated": 80,
       "ses": {
-        "dml": 0.05566645310899726,
-        "dr": 0.09589848931706772,
-        "matching": 0.07396750236590391
-      }
-    },
-    {
-      "anchor_minute": 13,
-      "confidence": 0.633727983135971,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": 0.014692289157807136,
-        "dr": 0.05489129455604642,
-        "matching": 0.04285714285714286
-      },
-      "max_t_stat": 2.402346341791359,
-      "n_control": 64,
-      "n_treated": 910,
-      "ses": {
-        "dml": 0.0647143312152021,
-        "dr": 0.09487339552106919,
-        "matching": 0.017839702007823546
+        "dml": 0.05566459263143186,
+        "dr": 0.09590124650097837,
+        "matching": 0.07314436175297451
       }
     },
     {
       "anchor_minute": 16,
-      "confidence": 1.6709491643272034,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.19541690351317137,
-        "dr": 0.0023907712981897974,
-        "matching": -0.1764004767580453
-      },
-      "max_t_stat": 10.458628174323012,
-      "n_control": 73,
-      "n_treated": 839,
-      "ses": {
-        "dml": 0.055340252348095045,
-        "dr": 0.1517426984306056,
-        "matching": 0.01686650235746274
-      }
-    },
-    {
-      "anchor_minute": 16,
-      "confidence": 3.776346432557745,
+      "confidence": 2.610284271541293,
       "decision_type": "SKILL_LEVEL_UP",
       "effects": {
-        "dml": 0.19644083832255035,
-        "dr": 0.1318166651943509,
-        "matching": 0.20828402366863905
+        "dml": 0.19645373451656925,
+        "dr": 0.13180951841382826,
+        "matching": 0.2106508875739645
       },
-      "max_t_stat": 12.763833680095374,
+      "max_t_stat": 3.518052962470023,
       "n_control": 67,
       "n_treated": 845,
       "ses": {
-        "dml": 0.055841949635008305,
-        "dr": 0.06991928401738162,
-        "matching": 0.01631829659402791
-      }
-    },
-    {
-      "anchor_minute": 19,
-      "confidence": 0.9716733234337822,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.05994975878852693,
-        "dr": 0.08275946305485214,
-        "matching": -0.12993630573248408
-      },
-      "max_t_stat": 6.997005338346513,
-      "n_control": 79,
-      "n_treated": 785,
-      "ses": {
-        "dml": 0.058161937307013294,
-        "dr": 0.20386160667794465,
-        "matching": 0.018570273917096907
-      }
-    },
-    {
-      "anchor_minute": 19,
-      "confidence": 1.4420116433214065,
-      "decision_type": "SKILL_LEVEL_UP",
-      "effects": {
-        "dml": 0.06356763963673898,
-        "dr": 0.07951658359084093,
-        "matching": 0.110397946084724
-      },
-      "max_t_stat": 5.930252753396775,
-      "n_control": 85,
-      "n_treated": 779,
-      "ses": {
-        "dml": 0.05985630021453602,
-        "dr": 0.09731135780708015,
-        "matching": 0.018616060845212615
+        "dml": 0.055841608017930235,
+        "dr": 0.06991605619868327,
+        "matching": 0.016249760555944914
       }
     },
     {
       "anchor_minute": 11,
-      "confidence": 0.7306996810335242,
-      "decision_type": "SKILL_LEVEL_UP",
-      "effects": {
-        "dml": 0.0245579418166372,
-        "dr": -0.05564073572706727,
-        "matching": -0.0536480686695279
-      },
-      "max_t_stat": 3.0252937302820357,
-      "n_control": 46,
-      "n_treated": 932,
-      "ses": {
-        "dml": 0.07643147171647086,
-        "dr": 0.08901149028374601,
-        "matching": 0.017733176825949562
-      }
-    },
-    {
-      "anchor_minute": 11,
-      "confidence": 1.617477144749518,
+      "confidence": 2.277122488476606,
       "decision_type": "ENGAGE",
       "effects": {
-        "dml": 0.11764839042868065,
-        "dr": 0.16552614246958286,
+        "dml": 0.11765870781161895,
+        "dr": 0.16552977543041897,
         "matching": 0.08571428571428572
       },
-      "max_t_stat": 3.157678684201688,
+      "max_t_stat": 3.157744043046337,
       "n_control": 943,
       "n_treated": 35,
       "ses": {
-        "dml": 0.071941727461793,
-        "dr": 0.05242019819740796,
+        "dml": 0.0719421650570845,
+        "dr": 0.0524202636989948,
         "matching": 0.10370239030965019
       }
     },
     {
       "anchor_minute": 12,
-      "confidence": 1.4752759196256628,
-      "decision_type": "ITEM_PURCHASED",
-      "effects": {
-        "dml": -0.07899720613908358,
-        "dr": -0.0812596457271533,
-        "matching": -0.06404494382022471
-      },
-      "max_t_stat": 3.4957164029536245,
-      "n_control": 86,
-      "n_treated": 890,
-      "ses": {
-        "dml": 0.06085981914780453,
-        "dr": 0.072859775390796,
-        "matching": 0.018320978145169736
-      }
-    },
-    {
-      "anchor_minute": 12,
-      "confidence": 2.5348467165310082,
+      "confidence": 2.045649503778129,
       "decision_type": "ENGAGE",
       "effects": {
-        "dml": 0.06184708587130878,
-        "dr": 0.22583652476079094,
-        "matching": 0.34285714285714286
+        "dml": 0.06185148546300698,
+        "dr": 0.22583729396054447,
+        "matching": 0.2857142857142857
       },
-      "max_t_stat": 3.867969603609501,
+      "max_t_stat": 3.867986258094029,
       "n_control": 941,
       "n_treated": 35,
       "ses": {
-        "dml": 0.08224954660871914,
-        "dr": 0.05838632355074493,
-        "matching": 0.1081131959584869
+        "dml": 0.08224817241494771,
+        "dr": 0.058386271018405066,
+        "matching": 0.11311352212694706
       }
     }
   ],
   "gate_e_pass": false,
   "gate_e_pass_within_band": true,
   "rejected": [
+    {
+      "anchor_minute": 10,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=1.13 < 1.96)"
+    },
     {
       "anchor_minute": 10,
       "decision_type": "WARD_PLACED",
@@ -387,6 +194,16 @@
     },
     {
       "anchor_minute": 14,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=1.56 < 1.96)"
+    },
+    {
+      "anchor_minute": 14,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "underpowered (max|t|=1.68 < 1.96)"
+    },
+    {
+      "anchor_minute": 14,
       "decision_type": "WARD_PLACED",
       "reason": "insufficient overlap (n_t=0, n_c=974, min=15)"
     },
@@ -402,13 +219,23 @@
     },
     {
       "anchor_minute": 18,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=0.73 < 1.96)"
+    },
+    {
+      "anchor_minute": 18,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "underpowered (max|t|=1.88 < 1.96)"
+    },
+    {
+      "anchor_minute": 18,
       "decision_type": "WARD_PLACED",
       "reason": "insufficient overlap (n_t=0, n_c=888, min=15)"
     },
     {
       "anchor_minute": 18,
       "decision_type": "ENGAGE",
-      "reason": "underpowered (max|t|=1.85 < 1.96)"
+      "reason": "underpowered (max|t|=0.98 < 1.96)"
     },
     {
       "anchor_minute": 18,
@@ -432,8 +259,13 @@
     },
     {
       "anchor_minute": 13,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=0.58 < 1.96)"
+    },
+    {
+      "anchor_minute": 13,
       "decision_type": "SKILL_LEVEL_UP",
-      "reason": "underpowered (max|t|=1.42 < 1.96)"
+      "reason": "underpowered (max|t|=0.53 < 1.96)"
     },
     {
       "anchor_minute": 13,
@@ -443,7 +275,7 @@
     {
       "anchor_minute": 13,
       "decision_type": "RECALL",
-      "reason": "underpowered (max|t|=1.75 < 1.96)"
+      "reason": "underpowered (max|t|=1.19 < 1.96)"
     },
     {
       "anchor_minute": 13,
@@ -457,13 +289,18 @@
     },
     {
       "anchor_minute": 16,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "estimator contradicts (t=3.53)"
+    },
+    {
+      "anchor_minute": 16,
       "decision_type": "WARD_PLACED",
       "reason": "insufficient overlap (n_t=0, n_c=912, min=15)"
     },
     {
       "anchor_minute": 16,
       "decision_type": "RECALL",
-      "reason": "underpowered (max|t|=1.57 < 1.96)"
+      "reason": "underpowered (max|t|=0.92 < 1.96)"
     },
     {
       "anchor_minute": 16,
@@ -474,6 +311,16 @@
       "anchor_minute": 16,
       "decision_type": "DISENGAGE",
       "reason": "insufficient overlap (n_t=8, n_c=904, min=15)"
+    },
+    {
+      "anchor_minute": 19,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=1.03 < 1.96)"
+    },
+    {
+      "anchor_minute": 19,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "underpowered (max|t|=1.06 < 1.96)"
     },
     {
       "anchor_minute": 19,
@@ -498,7 +345,12 @@
     {
       "anchor_minute": 11,
       "decision_type": "ITEM_PURCHASED",
-      "reason": "estimator contradicts (t=2.88)"
+      "reason": "underpowered (max|t|=0.51 < 1.96)"
+    },
+    {
+      "anchor_minute": 11,
+      "decision_type": "SKILL_LEVEL_UP",
+      "reason": "underpowered (max|t|=0.63 < 1.96)"
     },
     {
       "anchor_minute": 11,
@@ -514,6 +366,11 @@
       "anchor_minute": 11,
       "decision_type": "DISENGAGE",
       "reason": "insufficient overlap (n_t=4, n_c=974, min=15)"
+    },
+    {
+      "anchor_minute": 12,
+      "decision_type": "ITEM_PURCHASED",
+      "reason": "underpowered (max|t|=1.30 < 1.96)"
     },
     {
       "anchor_minute": 12,
@@ -540,15 +397,15 @@
     "accepts_per_type": {
       "DISENGAGE": 0,
       "ENGAGE": 4,
-      "ITEM_PURCHASED": 8,
+      "ITEM_PURCHASED": 1,
       "RECALL": 1,
-      "SKILL_LEVEL_UP": 7,
+      "SKILL_LEVEL_UP": 3,
       "WARD_PLACED": 0
     },
     "min_per_arm": 15,
-    "n_accepted": 20,
+    "n_accepted": 9,
     "n_pairs_evaluated": 54,
-    "n_rejected": 34,
+    "n_rejected": 45,
     "n_rows": 14176,
     "overlap_fail_rate": 0.37037037037037035,
     "overlap_floor": 0.2,
