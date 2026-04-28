@@ -266,6 +266,81 @@ def test_run_m4_eval_returns_structured_result(fixture_match_id):
         assert 0.0 <= v <= 1.0
 
 
+def test_cohort_minute_distribution_diagonal_dominant():
+    from model.m4_eval import cohort_minute_distribution
+
+    corpus_minute = torch.tensor([10] * 50 + [20] * 50, dtype=torch.int64)
+    # All cohort neighbors come from minute-10 rows (indices 0-49)
+    cohort_idx = torch.randint(0, 50, (10, 8))
+    query_minutes = torch.tensor([10] * 10, dtype=torch.int64)
+
+    dist = cohort_minute_distribution(cohort_idx, corpus_minute, query_minutes, minutes=[10, 20])
+
+    assert dist["same_minute_share_overall"] > 0.9
+    hm = dist["heatmap"]
+    assert hm[0, 0].item() > 0.9   # minute-10 queries → minute-10 cohort
+    assert hm[0, 1].item() < 0.1   # minute-10 queries → minute-20 cohort
+    assert abs(hm[0, 0].item() + hm[0, 1].item() - 1.0) < 1e-4
+
+
+def test_cohort_minute_distribution_broadly_mixed():
+    from model.m4_eval import cohort_minute_distribution
+
+    corpus_minute = torch.tensor([10] * 50 + [20] * 50, dtype=torch.int64)
+    # Each cohort is exactly half minute-10 and half minute-20
+    cohort_idx = torch.cat([
+        torch.randint(0, 50, (10, 4)),
+        torch.randint(50, 100, (10, 4)),
+    ], dim=1)
+    query_minutes = torch.tensor([10] * 10, dtype=torch.int64)
+
+    dist = cohort_minute_distribution(cohort_idx, corpus_minute, query_minutes, minutes=[10, 20])
+
+    assert abs(dist["same_minute_share_overall"] - 0.5) < 0.1
+    hm = dist["heatmap"]
+    assert abs(hm[0, 0].item() - 0.5) < 0.1
+    assert abs(hm[0, 1].item() - 0.5) < 0.1
+
+
+def test_cohort_minute_distribution_mass_conservation():
+    from model.m4_eval import cohort_minute_distribution
+
+    corpus_minute = torch.tensor([10] * 30 + [15] * 30 + [20] * 40, dtype=torch.int64)
+    cohort_idx = torch.randint(0, 100, (20, 16))
+    query_minutes = torch.tensor([10] * 10 + [15] * 5 + [20] * 5, dtype=torch.int64)
+
+    dist = cohort_minute_distribution(cohort_idx, corpus_minute, query_minutes, minutes=[10, 15, 20])
+    hm = dist["heatmap"]
+    for i, m in enumerate([10, 15, 20]):
+        if (query_minutes == m).any():
+            assert abs(hm[i].sum().item() - 1.0) < 1e-4
+
+
+def test_cohort_entropy_by_minute_match_same_vs_cross():
+    from model.m4_eval import cohort_entropy_by_minute_match
+
+    # 10 queries at minute 10; corpus: first 32 rows are minute-10 (all blue_win=1),
+    # last 32 rows are minute-20 (50/50 blue_win).
+    corpus_minute = torch.tensor([10] * 32 + [20] * 32, dtype=torch.int64)
+    blue_win = torch.tensor([1] * 32 + [1, 0] * 16, dtype=torch.int8)
+    # Cohorts: first 32 neighbors from minute-10 (all win), last 32 from minute-20 (mixed)
+    cohort_idx = torch.cat([
+        torch.arange(32).unsqueeze(0).expand(10, -1),
+        torch.arange(32, 64).unsqueeze(0).expand(10, -1),
+    ], dim=1)  # (10, 64)
+    query_minutes = torch.tensor([10] * 10, dtype=torch.int64)
+
+    result = cohort_entropy_by_minute_match(
+        cohort_idx, corpus_minute, query_minutes, blue_win, minutes=[10, 20], k_min=4,
+    )
+    # same-minute (minute-10) neighbors are all wins → entropy ≈ 0
+    assert result[10]["same_h"] < 0.1
+    # cross-minute (minute-20) neighbors are 50/50 → entropy ≈ 1 bit
+    assert result[10]["cross_h"] > 0.9
+    # minute-20 queries: no queries exist → nan
+    assert math.isnan(result[20]["same_h"])
+
+
 def test_encode_game_keys_eval_is_stochastic_without_rng_replay():
     from model.dataset import FRAME_FEAT_DIM, MACRO_FEAT_DIM
     from model.plan_b_model import PlanBModel

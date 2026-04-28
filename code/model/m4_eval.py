@@ -14,6 +14,7 @@ import json
 import math
 import os
 import tempfile
+from typing import Sequence
 
 import torch
 from torch.utils.data import DataLoader
@@ -134,12 +135,14 @@ def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
     sweep_means: dict[int, float] = {}
     headline_per_minute: dict[int, float] = {}
     headline_cohort_h = None
+    headline_cohort_idx = None
     k_values = [int(k) for k in k_sweep]
     if not k_values:
         return {
             "k_sweep": sweep_means,
             "per_minute_at_headline_k": headline_per_minute,
             "headline_cohort_entropies": headline_cohort_h,
+            "cohort_idx_at_headline_k": headline_cohort_idx,
         }
 
     print(
@@ -163,10 +166,12 @@ def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
                 cohort_h, query_minutes, headline_minutes,
             )
             headline_cohort_h = cohort_h
+            headline_cohort_idx = cohort_idx
     return {
         "k_sweep": sweep_means,
         "per_minute_at_headline_k": headline_per_minute,
         "headline_cohort_entropies": headline_cohort_h,
+        "cohort_idx_at_headline_k": headline_cohort_idx,
     }
 
 
@@ -195,7 +200,8 @@ def run_m4_eval(
         log_label=f"{holdout_label}/model",
     )
     out = {"holdout": holdout_label,
-           "n_queries": int(queries_raw.shape[0])}
+           "n_queries": int(queries_raw.shape[0]),
+           "query_minutes": query_minutes}
 
     out["model"] = _eval_one_index(
         model_bundle, queries_raw, query_minutes,
@@ -299,6 +305,274 @@ def _build_frame_features_queries(holdout_match_ids, mid_minutes):
     if not keys_list:
         return torch.zeros(0, FRAME_BASELINE_DIM), torch.zeros(0, dtype=torch.int64)
     return torch.cat(keys_list, dim=0), torch.cat(mins_list, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# Cohort-minute concentration diagnostic
+# ---------------------------------------------------------------------------
+
+
+def cohort_minute_distribution(
+    cohort_idx: torch.Tensor,
+    corpus_minute: torch.Tensor,
+    query_minutes: torch.Tensor,
+    minutes: Sequence[int],
+) -> dict:
+    """Per-query-minute → corpus-minute heatmap.
+
+    Returns a dict with:
+    - heatmap: (M, M) float row-stochastic, H[i,j] = P(cohort_minute=minutes[j] | query_minute=minutes[i])
+    - diagonal_mass: list[float] — H.diag() per minute
+    - same_minute_share_overall: float — fraction of all (Q*k) cohort entries matching query minute
+    - minutes: list[int]
+    """
+    minute_list = [int(m) for m in minutes]
+    M = len(minute_list)
+    Q, k = cohort_idx.shape
+
+    cohort_mins = corpus_minute[cohort_idx]  # (Q, k)
+
+    heatmap = torch.zeros(M, M)
+    for i, m_q in enumerate(minute_list):
+        row_mask = (query_minutes == m_q)
+        if not row_mask.any():
+            continue
+        c_mins_flat = cohort_mins[row_mask].reshape(-1)
+        for j, m_c in enumerate(minute_list):
+            heatmap[i, j] = float((c_mins_flat == m_c).sum().item())
+        row_sum = heatmap[i].sum()
+        if row_sum > 0:
+            heatmap[i] /= row_sum
+
+    # Mass conservation sanity
+    for i, m_q in enumerate(minute_list):
+        if (query_minutes == m_q).any():
+            row_sum = heatmap[i].sum().item()
+            assert abs(row_sum - 1.0) < 1e-4, (
+                f"cohort_minute_distribution: row minute={m_q} sum={row_sum:.6f}"
+            )
+
+    query_mins_exp = query_minutes.unsqueeze(1).expand_as(cohort_mins)
+    same_minute_share = float((cohort_mins == query_mins_exp).float().mean().item())
+
+    return {
+        "heatmap": heatmap,
+        "diagonal_mass": heatmap.diag().tolist(),
+        "same_minute_share_overall": same_minute_share,
+        "minutes": minute_list,
+    }
+
+
+def cohort_entropy_by_minute_match(
+    cohort_idx: torch.Tensor,
+    corpus_minute: torch.Tensor,
+    query_minutes: torch.Tensor,
+    blue_win: torch.Tensor,
+    minutes: Sequence[int],
+    k_min: int = 4,
+) -> dict[int, dict]:
+    """Per-query-minute mean cohort entropy split by same-minute vs cross-minute neighbors."""
+    minute_list = [int(m) for m in minutes]
+    cohort_mins = corpus_minute[cohort_idx]                   # (Q, k)
+    cohort_labels = blue_win[cohort_idx].float()              # (Q, k)
+    query_mins_exp = query_minutes.unsqueeze(1).expand_as(cohort_mins)
+    same_mask = (cohort_mins == query_mins_exp).float()        # (Q, k) 1.0 where same minute
+    cross_mask = 1.0 - same_mask
+
+    result: dict[int, dict] = {}
+    for m in minute_list:
+        q_mask = (query_minutes == m)
+        if not q_mask.any():
+            result[m] = {"same_h": float("nan"), "cross_h": float("nan"),
+                         "n_same_avg": 0.0, "n_cross_avg": 0.0}
+            continue
+
+        sm = same_mask[q_mask]          # (R, k)
+        cx = cross_mask[q_mask]         # (R, k)
+        lab = cohort_labels[q_mask]     # (R, k)
+        same_counts = sm.sum(dim=1)     # (R,)
+        cross_counts = cx.sum(dim=1)    # (R,)
+
+        valid_same = same_counts >= k_min
+        if valid_same.any():
+            p_same = (lab * sm).sum(dim=1) / same_counts.clamp(min=1)
+            h_same = float(binary_entropy(p_same[valid_same]).mean().item())
+        else:
+            h_same = float("nan")
+
+        valid_cross = cross_counts >= k_min
+        if valid_cross.any():
+            p_cross = (lab * cx).sum(dim=1) / cross_counts.clamp(min=1)
+            h_cross = float(binary_entropy(p_cross[valid_cross]).mean().item())
+        else:
+            h_cross = float("nan")
+
+        result[m] = {
+            "same_h": h_same,
+            "cross_h": h_cross,
+            "n_same_avg": float(same_counts.mean().item()),
+            "n_cross_avg": float(cross_counts.mean().item()),
+        }
+    return result
+
+
+def run_cohort_minute_diagnostic(
+    results: dict,
+    model_bundle,
+    ff_bundle,
+    minutes: Sequence[int],
+    report_path: str,
+) -> str:
+    """Write a cohort-minute concentration diagnostic report.
+
+    results: output of run_m4_eval calls keyed by holdout label. Each must
+    contain 'query_minutes' and result['model']['cohort_idx_at_headline_k'].
+
+    Returns a one-line interpretation string.
+    """
+    minute_list = [int(m) for m in minutes]
+    holdout_labels = [lbl for lbl in ("game_cold", "player_cold") if lbl in results]
+
+    all_model_shares: list[float] = []
+    sections = []
+
+    for label in holdout_labels:
+        r = results[label]
+        query_minutes = r.get("query_minutes")
+        if query_minutes is None:
+            continue
+        n_queries = r["n_queries"]
+
+        model_cohort_idx = r.get("model", {}).get("cohort_idx_at_headline_k")
+        ff_cohort_idx = r.get("frame_features", {}).get("cohort_idx_at_headline_k")
+
+        model_dist = None
+        if model_cohort_idx is not None:
+            model_dist = cohort_minute_distribution(
+                model_cohort_idx, model_bundle.row_anchor_minute,
+                query_minutes, minute_list,
+            )
+            all_model_shares.append(model_dist["same_minute_share_overall"])
+
+        ff_dist = None
+        if ff_cohort_idx is not None and ff_bundle is not None:
+            ff_dist = cohort_minute_distribution(
+                ff_cohort_idx, ff_bundle.row_anchor_minute,
+                query_minutes, minute_list,
+            )
+
+        entropy_split = None
+        if model_cohort_idx is not None:
+            entropy_split = cohort_entropy_by_minute_match(
+                model_cohort_idx, model_bundle.row_anchor_minute,
+                query_minutes, model_bundle.row_blue_win, minute_list,
+            )
+
+        sections.append((label, n_queries, model_dist, ff_dist, entropy_split))
+
+    mean_share = (sum(all_model_shares) / len(all_model_shares)) if all_model_shares else float("nan")
+    if math.isnan(mean_share):
+        verdict = "UNKNOWN (no cohort_idx_at_headline_k available)"
+        action = "Re-run retrieval-eval with --cohort-minute-diagnostic on a full eval."
+    elif mean_share > 0.5:
+        verdict = "DIAGONAL-DOMINANT (implicit time-partitioning confirmed)"
+        action = ("File follow-up to ablate minute-correlated frame-stat magnitudes from the key "
+                  "(per-minute z-score on gold/xp/cs before encoder); rerun M4 to test.")
+    elif mean_share < 0.25:
+        verdict = "BROADLY MIXED (model mixes across minutes)"
+        action = ("Investigate latent win-relevance directly "
+                  "(logistic probe of [h_t || mu(z_t)] against blue_win). "
+                  "Time-partitioning is not the cause of the M4 deficit.")
+    else:
+        verdict = "MID-RANGE"
+        action = ("Check same-vs-cross entropy gap in the report — "
+                  "if cross-minute entropy is systematically higher, "
+                  "time diversity is not helping retrieval quality.")
+
+    interpretation = f"same_minute_share={mean_share:.3f}: {verdict}. {action}"
+
+    lines = [
+        "# M4 Cohort-Minute Concentration Diagnostic",
+        "",
+        f"**Claim under test:** model latent implicitly clusters by minute despite globally-pooled retrieval.",
+        f"**k=headline_k**  **Retrieval index: globally pooled (no explicit minute filter)**",
+        "",
+        "## Summary",
+        "",
+        "| Holdout | model same_min_share | ff same_min_share | Verdict |",
+        "|---|---|---|---|",
+    ]
+    for label, n_queries, model_dist, ff_dist, _ in sections:
+        ms = f"{model_dist['same_minute_share_overall']:.3f}" if model_dist else "n/a"
+        fs = f"{ff_dist['same_minute_share_overall']:.3f}" if ff_dist else "n/a"
+        v = "diagonal-dominant" if model_dist and model_dist["same_minute_share_overall"] > 0.5 else (
+            "broadly mixed" if model_dist and model_dist["same_minute_share_overall"] < 0.25 else "mid-range"
+        )
+        lines.append(f"| {label} (n={n_queries}) | {ms} | {fs} | {v} |")
+
+    lines += ["", f"**Interpretation:** {interpretation}", ""]
+
+    for label, n_queries, model_dist, ff_dist, entropy_split in sections:
+        lines.append(f"## {label}")
+        lines.append("")
+
+        if model_dist is not None:
+            lines.append("### Model — Cohort-Minute Heatmap (row=query minute, col=corpus minute)")
+            lines.append("")
+            header = "| q\\\\c |" + "".join(f" {m} |" for m in minute_list)
+            sep = "|---|" + "---|" * len(minute_list)
+            lines += [header, sep]
+            hm = model_dist["heatmap"]
+            for i, m_q in enumerate(minute_list):
+                row = f"| **{m_q}** |"
+                for j in range(len(minute_list)):
+                    v = hm[i, j].item()
+                    row += f" **{v:.2f}** |" if i == j else f" {v:.2f} |"
+                lines.append(row)
+            lines.append("")
+
+        if model_dist is not None or ff_dist is not None:
+            lines.append("### Diagonal Mass — P(cohort_minute = query_minute)")
+            lines.append("")
+            lines.append("| Minute | model | frame_features |")
+            lines.append("|---|---|---|")
+            for i, m in enumerate(minute_list):
+                md = f"{model_dist['diagonal_mass'][i]:.3f}" if model_dist else "n/a"
+                fd = f"{ff_dist['diagonal_mass'][i]:.3f}" if ff_dist else "n/a"
+                lines.append(f"| {m} | {md} | {fd} |")
+            lines.append("")
+
+        if entropy_split is not None:
+            lines.append("### Same-Minute vs Cross-Minute Cohort Entropy (model only)")
+            lines.append("")
+            lines.append("| Minute | same-min h | cross-min h | Δ=cross−same | avg same-k | avg cross-k |")
+            lines.append("|---|---|---|---|---|---|")
+            for m in minute_list:
+                row_e = entropy_split.get(m, {})
+                sh = row_e.get("same_h", float("nan"))
+                ch = row_e.get("cross_h", float("nan"))
+                delta = (ch - sh) if (not math.isnan(sh) and not math.isnan(ch)) else float("nan")
+                ns = row_e.get("n_same_avg", 0.0)
+                nc = row_e.get("n_cross_avg", 0.0)
+                def _f(v):
+                    return f"{v:.3f}" if not math.isnan(v) else "nan"
+                lines.append(f"| {m} | {_f(sh)} | {_f(ch)} | {_f(delta)} | {ns:.1f} | {nc:.1f} |")
+            lines.append("")
+
+    report_dir = os.path.dirname(report_path)
+    if report_dir:
+        os.makedirs(report_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=report_dir or ".", prefix=".m4_diag.", suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp_path, report_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return interpretation
 
 
 # ---------------------------------------------------------------------------

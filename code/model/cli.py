@@ -533,7 +533,7 @@ def cmd_retrieval_eval(args):
         load_index, DEFAULT_INDEX_PATH, INDEX_DIR,
         K_SWEEP, HEADLINE_K, HEADLINE_GATE_BITS, MID_GAME_MINUTES,
     )
-    from model.m4_eval import run_m4_eval
+    from model.m4_eval import run_m4_eval, run_cohort_minute_diagnostic
 
     ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -600,6 +600,20 @@ def cmd_retrieval_eval(args):
     )
     _write_report(report_path, results, passed)
     print(f"[retrieval-eval] wrote report to {report_path}")
+
+    if args.cohort_minute_diagnostic:
+        diag_path = os.path.join(
+            report_dir, f"m4_cohort_minute_diagnostic_{date.today().isoformat()}.md",
+        )
+        summary = run_cohort_minute_diagnostic(
+            results=results,
+            model_bundle=model_bundle,
+            ff_bundle=ff_bundle,
+            minutes=MID_GAME_MINUTES,
+            report_path=diag_path,
+        )
+        print(f"[retrieval-eval] cohort-minute diagnostic: {summary}")
+        print(f"[retrieval-eval] wrote diagnostic to {diag_path}")
 
 
 def _print_eval_result(r: dict) -> None:
@@ -815,6 +829,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_re.add_argument(
         "--query-batch-size", type=int, default=128, dest="query_batch_size",
         help="Number of query keys per exact cdist/topk batch.",
+    )
+    p_re.add_argument(
+        "--cohort-minute-diagnostic", action="store_true",
+        dest="cohort_minute_diagnostic",
+        help="After main eval, write cohort-minute heatmap diagnostic (requires --baselines).",
     )
 
     p_ls = sub.add_parser("lesson", help="Generate lesson-anchor candidates for one game")
