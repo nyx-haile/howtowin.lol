@@ -208,6 +208,8 @@ def run_intervention_scan(
     n_games_scanned = 0
     n_anchors_scored = 0
     counters: dict = {}
+    total_games = len(ids)
+    log_every = max(1, min(50, total_games // 20)) if total_games else 1
 
     for batch in loader:
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
@@ -243,6 +245,13 @@ def run_intervention_scan(
                     "rank_band": band_label,
                 })
         n_games_scanned += 1
+        if n_games_scanned % log_every == 0 or n_games_scanned == total_games:
+            print(
+                f"[intervention] scanned {n_games_scanned}/{total_games} games"
+                f"  anchors_scored={n_anchors_scored}"
+                f"  candidates={len(candidates)}",
+                flush=True,
+            )
 
     # Aggregate stats for Gate D evaluation.
     per_type_max = {dt: 0.0 for dt in INTERVENTION_DECISION_TYPES}

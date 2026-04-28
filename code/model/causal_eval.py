@@ -524,8 +524,15 @@ def run_causal_filter(
     accepts_per_type = {dt: 0 for dt in INTERVENTION_DECISION_TYPES}
     overlap_values: list[float] = []
     n_overlap_fail = 0
+    n_pairs = len(pairs)
+    log_every = max(1, min(20, n_pairs // 20)) if n_pairs else 1
+    print(
+        f"[causal-filter] evaluating {n_pairs} candidate pairs "
+        f"over {len(rows)} rows",
+        flush=True,
+    )
 
-    for dt, minute in pairs:
+    for pi, (dt, minute) in enumerate(pairs, start=1):
         result = evaluate_pair(rows, dt, minute)
         diag = result.get("diagnostics", {})
         m = diag.get("matching") if isinstance(diag, dict) else None
@@ -556,6 +563,13 @@ def run_causal_filter(
                 "anchor_minute": minute,
                 "reason": result["reason"],
             })
+
+        if pi % log_every == 0 or pi == n_pairs:
+            print(
+                f"[causal-filter] {pi}/{n_pairs} pairs evaluated  "
+                f"accepted={len(accepted)}  rejected={len(rejected)}",
+                flush=True,
+            )
 
     overlap_median = float(np.median(overlap_values)) if overlap_values else 0.0
     overlap_fail_rate = n_overlap_fail / len(pairs) if pairs else 1.0
