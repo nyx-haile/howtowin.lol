@@ -151,18 +151,21 @@ def _fit_outcome_arm(X_tr: np.ndarray, Y_tr: np.ndarray, T_tr: np.ndarray, arm: 
 
 
 def _dr_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
-                  cluster_ids: Optional[np.ndarray] = None, K: int = 5) -> dict:
+                  cluster_ids: Optional[np.ndarray] = None, K: int = 5,
+                  random_state: int = 0) -> dict:
     """AIPW (doubly robust) ATE with K-fold cross-fitting.
 
     ``cluster_ids`` (one per row) gives a cluster-robust SE for the
     influence-function score ``psi``; without it, the SE is the IID
-    ``psi.std/√n``.
+    ``psi.std/√n``. ``random_state`` controls the KFold shuffle seed and
+    must match :func:`_dml_estimator` if the caller wants the two
+    estimators to be "two views of the same fold structure".
     """
     n = len(Y)
     if n < 2 * K:
         return {"effect": 0.0, "se": float("inf")}
     psi = np.zeros(n)
-    kf = KFold(n_splits=K, shuffle=True, random_state=0)
+    kf = KFold(n_splits=K, shuffle=True, random_state=random_state)
     for tr, te in kf.split(X):
         prop = LogisticRegression(max_iter=500, solver="liblinear")
         prop.fit(X[tr], T[tr])
@@ -184,18 +187,22 @@ def _dr_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
 
 
 def _dml_estimator(X: np.ndarray, T: np.ndarray, Y: np.ndarray,
-                   cluster_ids: Optional[np.ndarray] = None, K: int = 5) -> dict:
+                   cluster_ids: Optional[np.ndarray] = None, K: int = 5,
+                   random_state: int = 0) -> dict:
     """DML (Robinson partialling-out) ATE with K-fold cross-fitting.
 
     Cluster-robust sandwich: the meat term ``sum (T_res * resid)²`` is
     replaced with the sum of squared cluster-sums of ``T_res * resid``.
+    ``random_state`` controls the KFold shuffle seed and is shared with
+    :func:`_dr_estimator` by default so DR and DML see the same fold
+    splits, making their effect/SE pair directly comparable.
     """
     n = len(Y)
     if n < 2 * K:
         return {"effect": 0.0, "se": float("inf")}
     Y_res = np.zeros(n)
     T_res = np.zeros(n)
-    kf = KFold(n_splits=K, shuffle=True, random_state=1)
+    kf = KFold(n_splits=K, shuffle=True, random_state=random_state)
     for tr, te in kf.split(X):
         m_y = Ridge(alpha=1.0).fit(X[tr], Y[tr])
         Y_res[te] = Y[te] - m_y.predict(X[te])
@@ -449,6 +456,41 @@ def _candidate_pairs(candidates: list[dict]) -> list[tuple[str, int]]:
     return out
 
 
+def _build_caveat(rank_bands_seen: list[str], corpus_tag: str) -> str:
+    """Construct the ``_caveat`` string from runtime evidence.
+
+    Avoids hard-coded "51k corpus / master_plus" claims that go stale on a
+    rebalanced rerun. The caveat reports the corpus tag (if provided) and
+    classifies the rank coverage of the candidate set:
+
+    - 0 bands: empty result; no rank evidence at all.
+    - 1 band: cross-band rank-confounding check is vacuous.
+    - ≥2 bands: cross-band check is meaningful.
+    """
+    tag_clause = f"corpus={corpus_tag}; " if corpus_tag else ""
+    if not rank_bands_seen:
+        return (
+            f"{tag_clause}no rank bands appeared in the candidate set, so "
+            "rank-confounding evidence is unavailable. Treat any per-pair "
+            "estimates as preliminary."
+        )
+    bands_str = ", ".join(rank_bands_seen)
+    if len(rank_bands_seen) == 1:
+        return (
+            f"{tag_clause}candidate set is concentrated in a single rank "
+            f"band ({bands_str}); the cross-band rank-confounding check is "
+            "therefore vacuous and Gate E within-band evidence stands only "
+            "for that band. Cross-band validation requires a more rank-"
+            "balanced corpus."
+        )
+    return (
+        f"{tag_clause}candidate set spans rank bands {bands_str}; cross-"
+        "band rank-confounding check is non-vacuous. Per-band accept rates "
+        "should still be inspected for skew before promoting candidates to "
+        "the lesson surface."
+    )
+
+
 def run_causal_filter(
     *,
     model,
@@ -458,8 +500,15 @@ def run_causal_filter(
     candidates: list[dict],
     device: str = "cpu",
     max_games: Optional[int] = None,
+    corpus_tag: str = "",
 ) -> dict:
-    """End-to-end: extract rows, evaluate every candidate pair, build report."""
+    """End-to-end: extract rows, evaluate every candidate pair, build report.
+
+    ``corpus_tag`` is an optional short label for the corpus used in this
+    run (e.g. ``"51k-local"`` or ``"cloud-rebalanced-v1"``). It surfaces in
+    the report's ``_caveat`` field so downstream readers can tell which
+    corpus shape produced the rank-band pattern.
+    """
     rows = extract_rows(
         model=model,
         holdout_match_ids=holdout_match_ids,
@@ -523,14 +572,7 @@ def run_causal_filter(
     gate_e_pass = bool(gate_e_pass_within_band and len(rank_bands_seen) >= 2)
 
     return {
-        "_caveat": (
-            "51k corpus rank distribution is heavily skewed (≈67% master_plus, "
-            "≈32% unranked); the rank-confounding check is therefore degenerate "
-            "in this run — there is effectively only one band populating the "
-            "candidate set. Treat the per-pair causal estimates as Gate E "
-            "evidence within master_plus only; cross-band validation is "
-            "deferred to the cloud-rebuilt rebalanced corpus."
-        ),
+        "_caveat": _build_caveat(rank_bands_seen, corpus_tag),
         "accepted": accepted,
         "rejected": rejected,
         "gate_e_pass": gate_e_pass,

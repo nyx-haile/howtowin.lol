@@ -19,7 +19,9 @@ from model.causal_eval import (
     OVERLAP_FLOOR,
     SIGNIFICANCE_T,
     _agreement,
+    _build_caveat,
     _candidate_pairs,
+    _cluster_meat,
     _confidence,
     _dml_estimator,
     _dr_estimator,
@@ -258,3 +260,92 @@ def test_constants_are_sane():
     assert SIGNIFICANCE_T > 1.5  # ~1.96 → 95% CI
     assert GATE_E_MIN_ACCEPTS_TOTAL >= 1
     assert 0.0 < GATE_E_MAX_OVERLAP_FAIL_RATE <= 1.0
+
+
+# --- 15. _cluster_meat reduces to sum-of-squares without clusters ------------
+
+def test_cluster_meat_no_clusters_equals_squared_sum():
+    rng = np.random.default_rng(7)
+    scores = rng.standard_normal(50)
+    meat_iid = _cluster_meat(scores, None)
+    expected = float((scores ** 2).sum())
+    assert meat_iid == pytest.approx(expected, rel=0, abs=0.0)
+
+
+# --- 16. clustered SE inflates under within-cluster correlation -------------
+
+def test_cluster_meat_inflates_se_under_within_cluster_correlation():
+    """Clustered meat must be > IID meat when scores are positively
+    correlated within cluster.
+
+    Construction: 50 clusters of size 4. Each cluster's score is a base
+    value plus small noise — so within-cluster scores are nearly equal
+    (positive within-cluster correlation). The clustered sandwich sums
+    scores within cluster *before* squaring, which inflates the meat
+    relative to the IID middle term that just sums squared scores.
+    """
+    rng = np.random.default_rng(11)
+    n_clusters = 50
+    cluster_size = 4
+    base = rng.standard_normal(n_clusters)
+    clusters = np.repeat(np.arange(n_clusters), cluster_size)
+    scores = (
+        np.repeat(base, cluster_size)
+        + 0.05 * rng.standard_normal(n_clusters * cluster_size)
+    )
+
+    meat_iid = _cluster_meat(scores, None)
+    meat_clu = _cluster_meat(scores, clusters)
+
+    # Clustered meat ≈ Σ_c (cluster_size · base_c)² when noise is small,
+    # i.e. cluster_size² · Σ base². IID meat ≈ cluster_size · Σ base².
+    # So clustered should be substantially larger here.
+    assert meat_clu > meat_iid
+    # And the SE built on top scales with √meat — so it inflates too.
+    n = scores.shape[0]
+    se_iid = float(np.sqrt(meat_iid) / n)
+    se_clu = float(np.sqrt(meat_clu) / n)
+    assert se_clu > se_iid
+
+
+# --- 17. _build_caveat reflects rank-band coverage ---------------------------
+
+def test_build_caveat_no_bands_flags_unavailable_evidence():
+    msg = _build_caveat([], "")
+    assert "no rank bands" in msg.lower() or "unavailable" in msg.lower()
+
+
+def test_build_caveat_single_band_flags_vacuous_check():
+    msg = _build_caveat(["master_plus"], "51k-local")
+    assert "master_plus" in msg
+    assert "vacuous" in msg.lower() or "single rank band" in msg.lower()
+    assert "corpus=51k-local" in msg
+
+
+def test_build_caveat_multi_band_describes_non_vacuous_check():
+    msg = _build_caveat(["master_plus", "diamond"], "cloud-rebalanced-v1")
+    assert "master_plus" in msg and "diamond" in msg
+    assert "non-vacuous" in msg.lower()
+    assert "corpus=cloud-rebalanced-v1" in msg
+
+
+# --- 18. DR / DML share fold structure when random_state matches -------------
+
+def test_dr_and_dml_share_fold_structure_under_default_random_state():
+    """Default random_state is shared (0) for DR and DML, so on identical
+    inputs both estimators see the same KFold splits. We can't observe the
+    splits directly, but we can verify the kwarg threading: passing the
+    same random_state twice yields deterministic, reproducible effects.
+    """
+    X, T, Y = _synthetic_data(n=400, true_ate=0.3, confound=True, seed=21)
+    dr_a = _dr_estimator(X, T, Y, random_state=42)
+    dr_b = _dr_estimator(X, T, Y, random_state=42)
+    dml_a = _dml_estimator(X, T, Y, random_state=42)
+    dml_b = _dml_estimator(X, T, Y, random_state=42)
+    assert dr_a == dr_b
+    assert dml_a == dml_b
+    # Different seeds should generally produce a different effect for at
+    # least one of the two estimators (otherwise the seed isn't wired).
+    dr_other = _dr_estimator(X, T, Y, random_state=99)
+    dml_other = _dml_estimator(X, T, Y, random_state=99)
+    assert dr_a != dr_other or dml_a != dml_other

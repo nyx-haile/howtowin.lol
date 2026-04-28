@@ -405,6 +405,7 @@ def cmd_causal_filter(args):
         candidates=candidates,
         device=device,
         max_games=args.max_games,
+        corpus_tag=args.corpus_tag,
     )
     s = result["summary"]
     print(
@@ -871,6 +872,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_cf.add_argument("--device", default=None)
     p_cf.add_argument("--split", default="game_cold", choices=["game_cold", "player_cold"])
     p_cf.add_argument("--max-games", type=int, default=None, dest="max_games")
+    p_cf.add_argument(
+        "--corpus-tag", default="", dest="corpus_tag",
+        help=(
+            "Optional short label for the corpus shape used in this run "
+            "(e.g. '51k-local', 'cloud-rebalanced-v1'). Surfaces in the "
+            "report's _caveat field."
+        ),
+    )
 
     p_dr = sub.add_parser(
         "diagnose-rank",
