@@ -88,7 +88,8 @@ def per_minute_entropy_table(
 
 @torch.no_grad()
 def _build_holdout_queries(model, holdout_match_ids, puuid_index,
-                           exclude_match_ids, device, mid_minutes):
+                           exclude_match_ids, device, mid_minutes,
+                           *, log_every: int = 200, log_label: str = "model"):
     """Encode every mid-game anchor of every holdout game.
 
     Returns (queries_raw, query_minutes) of shapes (Q, KEY_DIM), (Q,).
@@ -107,8 +108,9 @@ def _build_holdout_queries(model, holdout_match_ids, puuid_index,
     keys_list: list[torch.Tensor] = []
     mins_list: list[torch.Tensor] = []
     mid_minute_set = set(int(m) for m in mid_minutes)
+    total = len(holdout_match_ids)
 
-    for batch in loader:
+    for i, batch in enumerate(loader, start=1):
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         keys, minutes, _ = encode_game_keys(model, batch)
         mask = torch.tensor([int(m.item()) in mid_minute_set for m in minutes],
@@ -116,6 +118,8 @@ def _build_holdout_queries(model, holdout_match_ids, puuid_index,
         if mask.any():
             keys_list.append(keys[mask].cpu())
             mins_list.append(minutes[mask].cpu())
+        if log_every and (i % log_every == 0 or i == total):
+            print(f"[m4_eval] {log_label}: encoded {i}/{total} games", flush=True)
 
     if not keys_list:
         from model.retrieval import KEY_DIM
@@ -125,7 +129,8 @@ def _build_holdout_queries(model, holdout_match_ids, puuid_index,
 
 
 def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
-                    headline_k, headline_minutes, device, query_batch_size):
+                    headline_k, headline_minutes, device, query_batch_size,
+                    log_label: str = "model"):
     sweep_means: dict[int, float] = {}
     headline_per_minute: dict[int, float] = {}
     headline_cohort_h = None
@@ -137,13 +142,21 @@ def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
             "headline_cohort_entropies": headline_cohort_h,
         }
 
+    print(
+        f"[m4_eval] {log_label}: querying {int(queries_raw.shape[0])} keys "
+        f"against corpus_rows={int(bundle.row_blue_win.shape[0])} "
+        f"(k_max={max(k_values)})",
+        flush=True,
+    )
     cohort_idx_wide, _ = query_index(
         bundle, queries_raw, k=max(k_values), device=device,
         batch_size=query_batch_size,
     )
     for k in k_values:
         cohort_idx = cohort_idx_wide[:, :k]
-        sweep_means[int(k)] = mean_entropy_at_k(cohort_idx, bundle.row_blue_win)
+        mean_h = mean_entropy_at_k(cohort_idx, bundle.row_blue_win)
+        sweep_means[int(k)] = mean_h
+        print(f"[m4_eval] {log_label}: k={k:>3} entropy={mean_h:.3f}", flush=True)
         if int(k) == int(headline_k):
             cohort_h = cohort_entropies(cohort_idx, bundle.row_blue_win)
             headline_per_minute = per_minute_entropy_table(
@@ -179,6 +192,7 @@ def run_m4_eval(
     queries_raw, query_minutes = _build_holdout_queries(
         model, holdout_match_ids, puuid_index, exclude_match_ids,
         device, headline_minutes,
+        log_label=f"{holdout_label}/model",
     )
     out = {"holdout": holdout_label,
            "n_queries": int(queries_raw.shape[0])}
@@ -188,6 +202,7 @@ def run_m4_eval(
         k_sweep=k_sweep, headline_k=headline_k,
         headline_minutes=headline_minutes,
         device=device, query_batch_size=query_batch_size,
+        log_label=f"{holdout_label}/model",
     )
 
     if run_baselines:
@@ -208,12 +223,14 @@ def run_m4_eval(
             so_queries = _build_static_only_queries(
                 model, holdout_match_ids, puuid_index, exclude_match_ids,
                 device, headline_minutes, batch_size=query_batch_size,
+                log_label=f"{holdout_label}/static_only",
             )
             out["static_only"] = _eval_one_index(
                 static_only_bundle, so_queries[0], so_queries[1],
                 k_sweep=k_sweep, headline_k=headline_k,
                 headline_minutes=headline_minutes, device=device,
                 query_batch_size=query_batch_size,
+                log_label=f"{holdout_label}/static_only",
             )
 
         if frame_features_bundle is not None:
@@ -225,6 +242,7 @@ def run_m4_eval(
                 k_sweep=k_sweep, headline_k=headline_k,
                 headline_minutes=headline_minutes, device=device,
                 query_batch_size=query_batch_size,
+                log_label=f"{holdout_label}/frame_features",
             )
     return out
 
@@ -232,26 +250,32 @@ def run_m4_eval(
 @torch.no_grad()
 def _build_static_only_queries(model, holdout_match_ids, puuid_index,
                                exclude_match_ids, device, mid_minutes,
-                               batch_size: int = 64):
+                               batch_size: int = 64,
+                               *, log_every: int = 50,
+                               log_label: str = "static_only"):
     from model.baselines.static_only_index import encode_static_only_query_keys
     from model.plan_b_model import D_H
     ds = MatchDataset(holdout_match_ids, puuid_index=puuid_index,
                       exclude_match_ids=exclude_match_ids, cache_size=1)
+    bs = max(1, int(batch_size))
     loader = DataLoader(
-        ds,
-        batch_size=max(1, int(batch_size)),
-        shuffle=False,
-        collate_fn=collate_games,
+        ds, batch_size=bs, shuffle=False, collate_fn=collate_games,
     )
     keys_list, mins_list = [], []
     mid_set = set(int(m) for m in mid_minutes)
-    for batch in loader:
+    total_batches = (len(holdout_match_ids) + bs - 1) // bs
+    for bi, batch in enumerate(loader, start=1):
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         keys, minutes = encode_static_only_query_keys(model, batch)
         mask = torch.tensor([int(m.item()) in mid_set for m in minutes], dtype=torch.bool)
         if mask.any():
             keys_list.append(keys[mask].cpu())
             mins_list.append(minutes[mask])
+        if log_every and (bi % log_every == 0 or bi == total_batches):
+            print(
+                f"[m4_eval] {log_label}: encoded batch {bi}/{total_batches}",
+                flush=True,
+            )
     if not keys_list:
         return torch.zeros(0, D_H), torch.zeros(0, dtype=torch.int64)
     return torch.cat(keys_list, dim=0), torch.cat(mins_list, dim=0)

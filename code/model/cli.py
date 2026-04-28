@@ -901,6 +901,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Long-running subcommands (train, retrieval-build, retrieval-eval) print
+    # progress lines that the operator relies on to distinguish "running" from
+    # "hung". Without line-buffered stdout these get block-buffered when the
+    # CLI is run under nohup/redirect, so make line buffering explicit here.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
     parser = build_parser()
     args = parser.parse_args(argv)
 
