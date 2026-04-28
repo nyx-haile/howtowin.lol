@@ -218,11 +218,21 @@ class PlanBSampleCache:
         self,
         match_ids: Sequence[str],
         builder: Callable[[str], dict[str, Any]],
+        *,
+        log_every: int = 200,
+        log_label: str = "materialize",
     ) -> None:
         if not self.enabled or self.config.mode == "readonly":
             return
-        for match_id in match_ids:
+        total = len(match_ids)
+        for i, match_id in enumerate(match_ids, start=1):
             self.get_or_build(match_id, builder)
+            if log_every and (i % log_every == 0 or i == total):
+                print(
+                    f"[{log_label}] {i}/{total} games materialized "
+                    f"(hits={self.hits}, misses={self.misses}, writes={self.writes})",
+                    flush=True,
+                )
 
     def stats(self) -> dict[str, int | str]:
         return {
