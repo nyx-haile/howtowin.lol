@@ -194,11 +194,28 @@ def run_m4_eval(
     frame_features_bundle=None,
     random_seed: int = 0,
 ) -> dict:
-    queries_raw, query_minutes = _build_holdout_queries(
-        model, holdout_match_ids, puuid_index, exclude_match_ids,
-        device, headline_minutes,
-        log_label=f"{holdout_label}/model",
+    from model.eval_cache import (
+        load_cached_keys, save_cached_keys,
+        load_cached_cohort_idx, save_cached_cohort_idx,
     )
+    ckpt_sha = getattr(model_bundle, "checkpoint_sha", None)
+
+    cached = load_cached_keys("model", holdout_label,
+                              checkpoint_sha=ckpt_sha,
+                              holdout_match_ids=holdout_match_ids)
+    if cached is not None:
+        queries_raw, query_minutes = cached["keys"], cached["minutes"]
+    else:
+        queries_raw, query_minutes = _build_holdout_queries(
+            model, holdout_match_ids, puuid_index, exclude_match_ids,
+            device, headline_minutes,
+            log_label=f"{holdout_label}/model",
+        )
+        save_cached_keys("model", holdout_label,
+                         checkpoint_sha=ckpt_sha,
+                         holdout_match_ids=holdout_match_ids,
+                         keys=queries_raw, minutes=query_minutes)
+
     out = {"holdout": holdout_label,
            "n_queries": int(queries_raw.shape[0]),
            "query_minutes": query_minutes}
@@ -210,6 +227,11 @@ def run_m4_eval(
         device=device, query_batch_size=query_batch_size,
         log_label=f"{holdout_label}/model",
     )
+    if out["model"].get("cohort_idx_at_headline_k") is not None:
+        save_cached_cohort_idx("model", holdout_label,
+                               checkpoint_sha=ckpt_sha,
+                               holdout_match_ids=holdout_match_ids,
+                               cohort_idx=out["model"]["cohort_idx_at_headline_k"])
 
     if run_baselines:
         # Random-k baseline (only sweep, no per-minute table — uniform by design).
@@ -226,11 +248,21 @@ def run_m4_eval(
         out["random"] = {"k_sweep": random_sweep}
 
         if static_only_bundle is not None:
-            so_queries = _build_static_only_queries(
-                model, holdout_match_ids, puuid_index, exclude_match_ids,
-                device, headline_minutes, batch_size=query_batch_size,
-                log_label=f"{holdout_label}/static_only",
-            )
+            so_cached = load_cached_keys("static_only", holdout_label,
+                                         checkpoint_sha=ckpt_sha,
+                                         holdout_match_ids=holdout_match_ids)
+            if so_cached is not None:
+                so_queries = (so_cached["keys"], so_cached["minutes"])
+            else:
+                so_queries = _build_static_only_queries(
+                    model, holdout_match_ids, puuid_index, exclude_match_ids,
+                    device, headline_minutes, batch_size=query_batch_size,
+                    log_label=f"{holdout_label}/static_only",
+                )
+                save_cached_keys("static_only", holdout_label,
+                                 checkpoint_sha=ckpt_sha,
+                                 holdout_match_ids=holdout_match_ids,
+                                 keys=so_queries[0], minutes=so_queries[1])
             out["static_only"] = _eval_one_index(
                 static_only_bundle, so_queries[0], so_queries[1],
                 k_sweep=k_sweep, headline_k=headline_k,
@@ -238,11 +270,26 @@ def run_m4_eval(
                 query_batch_size=query_batch_size,
                 log_label=f"{holdout_label}/static_only",
             )
+            if out["static_only"].get("cohort_idx_at_headline_k") is not None:
+                save_cached_cohort_idx("static_only", holdout_label,
+                                       checkpoint_sha=ckpt_sha,
+                                       holdout_match_ids=holdout_match_ids,
+                                       cohort_idx=out["static_only"]["cohort_idx_at_headline_k"])
 
         if frame_features_bundle is not None:
-            ff_queries = _build_frame_features_queries(
-                holdout_match_ids, headline_minutes,
-            )
+            ff_cached = load_cached_keys("frame_features", holdout_label,
+                                         checkpoint_sha=None,
+                                         holdout_match_ids=holdout_match_ids)
+            if ff_cached is not None:
+                ff_queries = (ff_cached["keys"], ff_cached["minutes"])
+            else:
+                ff_queries = _build_frame_features_queries(
+                    holdout_match_ids, headline_minutes,
+                )
+                save_cached_keys("frame_features", holdout_label,
+                                 checkpoint_sha=None,
+                                 holdout_match_ids=holdout_match_ids,
+                                 keys=ff_queries[0], minutes=ff_queries[1])
             out["frame_features"] = _eval_one_index(
                 frame_features_bundle, ff_queries[0], ff_queries[1],
                 k_sweep=k_sweep, headline_k=headline_k,
@@ -250,6 +297,11 @@ def run_m4_eval(
                 query_batch_size=query_batch_size,
                 log_label=f"{holdout_label}/frame_features",
             )
+            if out["frame_features"].get("cohort_idx_at_headline_k") is not None:
+                save_cached_cohort_idx("frame_features", holdout_label,
+                                       checkpoint_sha=None,
+                                       holdout_match_ids=holdout_match_ids,
+                                       cohort_idx=out["frame_features"]["cohort_idx_at_headline_k"])
     return out
 
 

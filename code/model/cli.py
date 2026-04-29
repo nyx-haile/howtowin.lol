@@ -534,6 +534,9 @@ def cmd_retrieval_eval(args):
         K_SWEEP, HEADLINE_K, HEADLINE_GATE_BITS, MID_GAME_MINUTES,
     )
     from model.m4_eval import run_m4_eval, run_cohort_minute_diagnostic
+    from model.eval_cache import (
+        delete_cached, load_cached_keys, load_cached_cohort_idx,
+    )
 
     ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -559,17 +562,82 @@ def cmd_retrieval_eval(args):
         f"query_batch_size={args.query_batch_size}"
     )
 
-    model = PlanBModel(max_puuids=max_puuids).to(device)
-    model.load_state_dict(ckpt["state_dict"])
-
     model_bundle = load_index(DEFAULT_INDEX_PATH)
     so_bundle = ff_bundle = None
-    if args.baselines:
+    if args.baselines or getattr(args, "diagnostic_only", False):
         so_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_static_only_index.pt"))
         ff_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_frame_features_index.pt"))
 
+    ckpt_sha = model_bundle.checkpoint_sha
+    holdout_pairs = [("game_cold", val), ("player_cold", cold)]
+
+    # --rebuild-cache: wipe cache files for all kinds × all holdouts before running.
+    if getattr(args, "rebuild_cache", False):
+        all_kinds = ["model", "static_only", "frame_features"]
+        total_deleted = 0
+        for kind in all_kinds:
+            for label, ids in holdout_pairs:
+                csha = ckpt_sha if kind != "frame_features" else None
+                total_deleted += delete_cached(kind, label,
+                                               checkpoint_sha=csha,
+                                               holdout_match_ids=ids)
+        print(f"[retrieval-eval] --rebuild-cache: deleted {total_deleted} cache files")
+
+    # --diagnostic-only: skip full eval, use cached cohort_idx + query_minutes.
+    if getattr(args, "diagnostic_only", False):
+        if not (getattr(args, "baselines", False) or ff_bundle is not None):
+            raise SystemExit(
+                "[retrieval-eval] --diagnostic-only requires --baselines "
+                "(frame_features bundle needed for comparison)."
+            )
+        results = {}
+        for label, ids in holdout_pairs:
+            model_cohort = load_cached_cohort_idx("model", label,
+                                                   checkpoint_sha=ckpt_sha,
+                                                   holdout_match_ids=ids)
+            ff_cohort = load_cached_cohort_idx("frame_features", label,
+                                               checkpoint_sha=None,
+                                               holdout_match_ids=ids)
+            keys_cache = load_cached_keys("model", label,
+                                          checkpoint_sha=ckpt_sha,
+                                          holdout_match_ids=ids)
+            missing = []
+            if model_cohort is None:
+                missing.append(f"model/cohort_idx/{label}")
+            if keys_cache is None:
+                missing.append(f"model/keys/{label}")
+            if missing:
+                raise SystemExit(
+                    f"[retrieval-eval] --diagnostic-only: cache miss for {missing}. "
+                    "Run a full retrieval-eval first to populate the cache."
+                )
+            query_minutes = keys_cache["minutes"]
+            results[label] = {
+                "n_queries": int(query_minutes.shape[0]),
+                "query_minutes": query_minutes,
+                "model": {"cohort_idx_at_headline_k": model_cohort},
+                "frame_features": {"cohort_idx_at_headline_k": ff_cohort},
+            }
+            print(f"[retrieval-eval] --diagnostic-only: loaded cache for {label} "
+                  f"(n_queries={results[label]['n_queries']})")
+
+        report_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docs")
+        diag_path = os.path.join(
+            report_dir, f"m4_cohort_minute_diagnostic_{date.today().isoformat()}.md",
+        )
+        summary = run_cohort_minute_diagnostic(
+            results=results, model_bundle=model_bundle, ff_bundle=ff_bundle,
+            minutes=MID_GAME_MINUTES, report_path=diag_path,
+        )
+        print(f"[retrieval-eval] cohort-minute diagnostic: {summary}")
+        print(f"[retrieval-eval] wrote diagnostic to {diag_path}")
+        return
+
+    model = PlanBModel(max_puuids=max_puuids).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+
     results = {}
-    for label, ids in [("game_cold", val), ("player_cold", cold)]:
+    for label, ids in holdout_pairs:
         print(f"\n=== {label.upper()} ({len(ids)} games) ===")
         r = run_m4_eval(
             model=model, model_bundle=model_bundle,
@@ -834,6 +902,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--cohort-minute-diagnostic", action="store_true",
         dest="cohort_minute_diagnostic",
         help="After main eval, write cohort-minute heatmap diagnostic (requires --baselines).",
+    )
+    p_re.add_argument(
+        "--rebuild-cache", action="store_true", dest="rebuild_cache",
+        help="Delete matching cache files before running (forces re-encoding).",
+    )
+    p_re.add_argument(
+        "--diagnostic-only", action="store_true", dest="diagnostic_only",
+        help=(
+            "Load cached cohort_idx + query_minutes and run only the cohort-minute "
+            "diagnostic. Requires --baselines and a prior full eval with --cohort-minute-diagnostic. "
+            "Errors if cache files are missing."
+        ),
     )
 
     p_ls = sub.add_parser("lesson", help="Generate lesson-anchor candidates for one game")
