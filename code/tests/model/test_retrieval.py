@@ -325,3 +325,166 @@ def test_query_index_skill_aware_single_batch_stays_silent(capsys):
     )
 
     assert "query_index_skill_aware:" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# M4 eval Stage 2 (htw-cfu) — batched query encoder.
+# ---------------------------------------------------------------------------
+
+
+_ANCHOR_DIM_KEYS = (
+    "anchor_positions",
+    "frame_features",
+    "anchor_macro_features",
+    "decision_labels",
+)
+
+
+def _truncate_anchors(sample: dict, n: int) -> dict:
+    """A copy of a MatchDataset sample keeping only its first ``n`` anchors.
+
+    Used to get two games with *different* anchor counts out of one fixture, so
+    collate has to pad and the batched encoder has to slice by anchor_mask.
+    """
+    out = dict(sample)
+    for key in _ANCHOR_DIM_KEYS:
+        out[key] = sample[key][:n]
+    for key in sample:
+        if key.startswith("next_event_") and key.endswith("_labels"):
+            out[key] = sample[key][:n]
+    out["window_positions"] = sample["window_positions"][:n]
+    return out
+
+
+def test_encode_game_keys_batched_matches_b1_under_deterministic_reparam(
+    monkeypatch, fixture_match_id,
+):
+    """B>1 batching is exact — but only under a *deterministic* eval forward.
+
+    PlanB's eval forward samples ``z_post``, so raw B=1 vs B>1 keys never match;
+    that is exactly what ``test_m4_eval.py::
+    test_encode_game_keys_eval_is_stochastic_without_rng_replay`` pins down, and
+    it is why this test monkeypatches ``reparameterize`` to its mean instead of
+    comparing two stochastic encodings. Do not "simplify" this back into a naive
+    parity assertion.
+
+    Even deterministic, parity is *numerical*, not bitwise: float32 GEMM
+    reductions order differently at B=1 vs B>1 and the RSSM recurrence carries
+    that through ~25 steps, which measures at ~5e-5 max abs on unit-scale keys
+    here (mean ~1e-7). The tolerances below are set to catch a real slicing or
+    alignment bug — those move keys by O(1), not O(1e-4).
+    """
+    import model.plan_b_model as plan_b_model_module
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import encode_game_keys, encode_game_keys_batched
+
+    monkeypatch.setattr(
+        plan_b_model_module, "reparameterize", lambda mu, logvar: mu,
+    )
+
+    idx = build_puuid_index([fixture_match_id])
+    ds = MatchDataset([fixture_match_id], puuid_index=idx)
+    full = ds[0]
+    n_full = full["anchor_positions"].shape[0]
+    short = _truncate_anchors(full, n_full // 2)
+    assert short["anchor_positions"].shape[0] < n_full, "need unequal T to pad"
+
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    samples = [full, short]
+    batched = encode_game_keys_batched(model, collate_games(samples))
+    assert len(batched) == len(samples)
+
+    for gi, s in enumerate(samples):
+        keys_1, minutes_1, blue_win_1 = encode_game_keys(model, collate_games([s]))
+        keys_b, minutes_b, blue_win_b = batched[gi]
+        # Padded anchors of the short game must be sliced off, not returned.
+        assert keys_b.shape == keys_1.shape == (
+            s["anchor_positions"].shape[0], keys_1.shape[1],
+        )
+        diff = (keys_b - keys_1).abs()
+        assert diff.max().item() < 2e-4, (
+            f"game {gi}: max abs key diff {diff.max().item():.3e} is far above "
+            "float32 batched-kernel noise — suspect anchor slicing/alignment"
+        )
+        assert diff.mean().item() < 1e-5, f"game {gi} mean key diff too large"
+        # Minutes and outcome are index arithmetic, so those ARE exact.
+        assert torch.equal(minutes_b, minutes_1)
+        assert torch.equal(blue_win_b, blue_win_1)
+
+
+def test_encode_game_keys_batched_is_row_order_invariant(
+    monkeypatch, fixture_match_id,
+):
+    """Two identical games in one batch encode bitwise-identically.
+
+    This is the structural half of the parity claim, and unlike the B=1 vs B>1
+    comparison it needs no tolerance: same batch, same kernel, same reduction
+    order. It fails loudly if rows are ever mixed up during anchor_mask slicing.
+    """
+    import model.plan_b_model as plan_b_model_module
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import encode_game_keys_batched
+
+    monkeypatch.setattr(
+        plan_b_model_module, "reparameterize", lambda mu, logvar: mu,
+    )
+
+    idx = build_puuid_index([fixture_match_id])
+    ds = MatchDataset([fixture_match_id], puuid_index=idx)
+    full = ds[0]
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    per_game = encode_game_keys_batched(model, collate_games([full, full]))
+    assert torch.equal(per_game[0][0], per_game[1][0])
+    assert torch.equal(per_game[0][1], per_game[1][1])
+
+
+def test_encode_game_keys_batched_runs_one_forward_per_batch():
+    """The batched encoder calls model.forward exactly once, whatever B is."""
+    from model.retrieval import encode_game_keys_batched, D_H, D_Z, KEY_DIM
+
+    calls = []
+
+    class StubModel:
+        training = False
+
+        def eval(self):
+            return self
+
+        def train(self, mode=True):
+            self.training = bool(mode)
+            return self
+
+        def __call__(self, batch):
+            B, T = batch["anchor_mask"].shape
+            calls.append(B)
+            return {"h": torch.zeros(B, T, D_H),
+                    "post_mu": torch.zeros(B, T, D_Z),
+                    "n_anchors": T}
+
+    B, T = 4, 3
+    anchor_mask = torch.ones(B, T, dtype=torch.bool)
+    anchor_mask[2, 1:] = False        # a short game
+    anchor_mask[3, :] = False         # a game with no valid anchors at all
+    batch = {
+        "static": torch.zeros(B, 1),
+        "players": torch.zeros(B, 10, 1),
+        "tokens": torch.zeros(B, 5, dtype=torch.long),
+        "anchor_positions": torch.zeros(B, T, dtype=torch.long),
+        "anchor_mask": anchor_mask,
+        "token_timestamps": torch.full((B, 5), 600000.0),
+        "outcome": torch.ones(B),
+    }
+
+    per_game = encode_game_keys_batched(StubModel(), batch)
+
+    assert calls == [B], "one forward per batch, not one per game"
+    assert len(per_game) == B, "result stays index-aligned with batch rows"
+    assert [g[0].shape[0] for g in per_game] == [T, T, 1, 0]
+    assert per_game[3][0].shape == (0, KEY_DIM)
+    assert per_game[3][1].shape == (0,)

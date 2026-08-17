@@ -1,6 +1,8 @@
+import pytest
+import torch
+
 import model.cli as cli
 import model.plan_b_train as plan_b_train_module
-import torch
 
 
 def test_plan_b_train_cli_forwards_runtime_knobs(monkeypatch):
@@ -182,3 +184,103 @@ def test_retrieval_eval_forwards_device_and_query_batch_size(monkeypatch, capsys
 
     out = capsys.readouterr().out
     assert "[retrieval-eval] device=cpu cuda_available=True query_batch_size=7" in out
+
+
+def test_retrieval_eval_parser_exposes_query_encoder_batch_size():
+    from model.m4_eval import DEFAULT_QUERY_ENCODER_BATCH_SIZE
+
+    defaults = cli.build_parser().parse_args(["retrieval-eval"])
+    assert defaults.query_encoder_batch_size == 32
+    # The CLI default and the library default must not drift apart.
+    assert defaults.query_encoder_batch_size == DEFAULT_QUERY_ENCODER_BATCH_SIZE
+
+    args = cli.build_parser().parse_args(
+        ["retrieval-eval", "--query-encoder-batch-size", "9"]
+    )
+    assert args.query_encoder_batch_size == 9
+
+
+def test_retrieval_eval_forwards_query_encoder_batch_size(monkeypatch, capsys):
+    """cmd_retrieval_eval hands --query-encoder-batch-size to run_m4_eval.
+
+    Deliberately a separate test from
+    ``test_retrieval_eval_forwards_device_and_query_batch_size``: that one was
+    already red before this change (its fake load_index returns a bare dict, so
+    ``model_bundle.checkpoint_sha`` raises). This uses a bundle stub carrying
+    checkpoint_sha so the forwarding is actually exercised.
+    """
+    from types import SimpleNamespace
+
+    import model.m4_eval as m4_eval_module
+    import model.plan_b_model as plan_b_model_module
+    import model.retrieval as retrieval_module
+
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, max_puuids):
+            pass
+
+        def to(self, device):
+            return self
+
+        def load_state_dict(self, state_dict):
+            pass
+
+    def fake_run_m4_eval(**kwargs):
+        captured.setdefault("runs", []).append(kwargs)
+        return {
+            "n_queries": 1,
+            "model": {
+                "k_sweep": {64: 0.8},
+                "per_minute_at_headline_k": {10: 0.8},
+            },
+        }
+
+    monkeypatch.setattr(torch, "load", lambda *a, **kw: {
+        "max_puuids": 123,
+        "state_dict": {"weight": "fake"},
+    })
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(plan_b_model_module, "PlanBModel", FakeModel)
+    monkeypatch.setattr(
+        retrieval_module, "load_index",
+        lambda path: SimpleNamespace(checkpoint_sha="deadbeef"),
+    )
+    monkeypatch.setattr(m4_eval_module, "run_m4_eval", fake_run_m4_eval)
+    monkeypatch.setattr(cli, "load_split", lambda name: {
+        "train": ["train-1"],
+        "holdout": ["game-cold-1"],
+        "cold": ["player-cold-1"],
+    }[name])
+    monkeypatch.setattr(cli, "build_puuid_index", lambda ids, max_puuids: {})
+    monkeypatch.setattr(cli, "_print_eval_result", lambda r: None)
+    monkeypatch.setattr(cli, "_write_report", lambda path, results, passed: None)
+
+    args = cli.build_parser().parse_args(
+        ["retrieval-eval", "--query-encoder-batch-size", "8"]
+    )
+    cli.cmd_retrieval_eval(args)
+
+    runs = captured["runs"]
+    assert [run["holdout_label"] for run in runs] == ["game_cold", "player_cold"]
+    assert all(run["query_encoder_batch_size"] == 8 for run in runs)
+    assert "[retrieval-eval] query_encoder_batch_size=8" in capsys.readouterr().out
+
+
+def test_retrieval_eval_rejects_non_positive_query_encoder_batch_size(monkeypatch):
+    import model.plan_b_model as plan_b_model_module
+
+    monkeypatch.setattr(torch, "load", lambda *a, **kw: {
+        "max_puuids": 1, "state_dict": {},
+    })
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(plan_b_model_module, "PlanBModel", lambda **kw: None)
+    monkeypatch.setattr(cli, "load_split", lambda name: [])
+    monkeypatch.setattr(cli, "build_puuid_index", lambda ids, max_puuids: {})
+
+    args = cli.build_parser().parse_args(
+        ["retrieval-eval", "--query-encoder-batch-size", "0"]
+    )
+    with pytest.raises(SystemExit, match="query-encoder-batch-size"):
+        cli.cmd_retrieval_eval(args)

@@ -108,31 +108,78 @@ class Whitener:
 
 
 @torch.no_grad()
-def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run model.forward on a single-game batch (B=1) and return:
+def encode_game_keys_batched(
+    model, batch,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Run model.forward ONCE on a B-game batch and split the result per game.
 
-    keys:       (T, KEY_DIM) — concat of [h_t, post_mu_t] per anchor.
-    minutes:    (T,) int64 — anchor minute = round(token_timestamp / 60000).
+    Returns a list of length B, in DataLoader/sample order. Entry ``bi`` is a
+    ``(keys, minutes, blue_win)`` triple:
+
+    keys:       (T_bi, KEY_DIM) — concat of [h_t, post_mu_t] over that game's
+                *valid* anchors only. Collate pads every game up to the batch's
+                longest anchor sequence; the padded tail is dropped here.
+    minutes:    (T_bi,) int64 on CPU — round(token_timestamp / 60000).
     blue_win:   () int8 — game-level outcome (1 if blue won, else 0).
+
+    Games with no valid anchors yield empty ``keys``/``minutes`` rather than
+    being skipped, so the result stays index-aligned with the batch rows.
+
+    NOTE: the keys are NOT reproducible across calls — PlanB's eval forward
+    samples ``z_post`` (see ``rssm.reparameterize``), so B=1 and B>1 encodings
+    of the same game agree only under a deterministic-``reparameterize``
+    contract. See ``tests/model/test_m4_eval.py`` ::
+    ``test_encode_game_keys_eval_is_stochastic_without_rng_replay``.
     """
-    assert batch["tokens"].size(0) == 1, "encode_game_keys expects B=1"
     was_training = model.training
     model.eval()
     out = model(batch)
     model.train(was_training)
 
-    T = out["n_anchors"]
-    h = out["h"][0]                # (T, D_H)
-    post_mu = out["post_mu"][0]    # (T, D_Z)
-    keys = torch.cat([h, post_mu], dim=-1)  # (T, KEY_DIM)
+    h = out["h"]                                 # (B, T, D_H)
+    post_mu = out["post_mu"]                     # (B, T, D_Z)
+    keys_all = torch.cat([h, post_mu], dim=-1)   # (B, T, KEY_DIM)
+    outcome = batch["outcome"].to(dtype=torch.int8)
 
-    anchor_pos = batch["anchor_positions"][0]   # (T,)
-    ts = batch["token_timestamps"][0]           # (L,)
-    anchor_ts = ts.gather(0, anchor_pos.long()) # (T,) ms
-    minutes = (anchor_ts / 60000.0).round().to(torch.int64)
+    per_game: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    # The anchor_mask slicing below (loop header through `minutes = ...`) is
+    # copied verbatim from model/baselines/static_only_index.py:162-169
+    # (encode_static_only_query_keys) so both encoders drop padded anchors and
+    # derive anchor minutes identically. Only the empty-game branch differs:
+    # static-only `continue`s, we emit an empty entry to keep row alignment.
+    for bi in range(batch["static"].size(0)):
+        anchor_mask = batch["anchor_mask"][bi]
+        if not anchor_mask.any():
+            per_game.append((
+                keys_all.new_zeros(0, KEY_DIM),
+                torch.zeros(0, dtype=torch.int64),
+                outcome[bi],
+            ))
+            continue
+        anchor_pos = batch["anchor_positions"][bi, anchor_mask].long()
+        ts = batch["token_timestamps"][bi]
+        anchor_ts = ts.gather(0, anchor_pos)
+        minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
+        per_game.append((keys_all[bi][anchor_mask], minutes, outcome[bi]))
+    return per_game
 
-    blue_win = batch["outcome"][0].to(dtype=torch.int8)
-    return keys, minutes, blue_win
+
+@torch.no_grad()
+def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """B=1 wrapper over :func:`encode_game_keys_batched`. Returns:
+
+    keys:       (T, KEY_DIM) — concat of [h_t, post_mu_t] per anchor.
+    minutes:    (T,) int64 — anchor minute = round(token_timestamp / 60000).
+    blue_win:   () int8 — game-level outcome (1 if blue won, else 0).
+
+    A B=1 collate never pads (max_T is the single game's own anchor count), so
+    the anchor_mask filter in the batched encoder is a no-op here and the keys
+    are identical to the pre-batching implementation. The one deliberate
+    contract change: ``minutes`` now always comes back on CPU, matching the
+    static-only baseline encoder. Every in-tree caller already moved it to CPU.
+    """
+    assert batch["tokens"].size(0) == 1, "encode_game_keys expects B=1"
+    return encode_game_keys_batched(model, batch)[0]
 
 
 @torch.no_grad()

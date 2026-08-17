@@ -556,10 +556,16 @@ def cmd_retrieval_eval(args):
         )
     if args.query_batch_size <= 0:
         raise SystemExit("--query-batch-size must be a positive integer")
+    query_encoder_batch_size = getattr(args, "query_encoder_batch_size", 32)
+    if query_encoder_batch_size <= 0:
+        raise SystemExit("--query-encoder-batch-size must be a positive integer")
     print(
         "[retrieval-eval] "
         f"device={device} cuda_available={cuda_available} "
         f"query_batch_size={args.query_batch_size}"
+    )
+    print(
+        f"[retrieval-eval] query_encoder_batch_size={query_encoder_batch_size}"
     )
 
     model_bundle = load_index(DEFAULT_INDEX_PATH)
@@ -646,6 +652,7 @@ def cmd_retrieval_eval(args):
             k_sweep=K_SWEEP, headline_k=HEADLINE_K,
             headline_minutes=MID_GAME_MINUTES,
             device=device, query_batch_size=args.query_batch_size,
+            query_encoder_batch_size=query_encoder_batch_size,
             run_baselines=args.baselines,
             static_only_bundle=so_bundle,
             frame_features_bundle=ff_bundle,
@@ -897,6 +904,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_re.add_argument(
         "--query-batch-size", type=int, default=128, dest="query_batch_size",
         help="Number of query keys per exact cdist/topk batch.",
+    )
+    p_re.add_argument(
+        "--query-encoder-batch-size", type=int, default=32,
+        dest="query_encoder_batch_size",
+        help=(
+            "Number of holdout games per batched model.forward when encoding "
+            "query keys. Must match model.m4_eval.DEFAULT_QUERY_ENCODER_BATCH_SIZE."
+        ),
     )
     p_re.add_argument(
         "--cohort-minute-diagnostic", action="store_true",
