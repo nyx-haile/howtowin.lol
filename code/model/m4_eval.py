@@ -635,6 +635,7 @@ def run_cohort_minute_diagnostic(
 @torch.no_grad()
 def _build_holdout_queries_with_meta(
     model, holdout_match_ids, puuid_index, exclude_match_ids, device, mid_minutes,
+    *, log_every: int = 200, log_label: str = "skill_aware",
 ):
     """Per-anchor queries plus per-query metadata.
 
@@ -659,21 +660,24 @@ def _build_holdout_queries_with_meta(
 
     keys_list, mins_list, bands_list, bw_list, mid_list = [], [], [], [], []
     mid_set = set(int(m) for m in mid_minutes)
+    total = len(holdout_match_ids)
 
     for i, batch in enumerate(loader):
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         keys, minutes, blue_win = encode_game_keys(model, batch)
         mask = torch.tensor([int(m.item()) in mid_set for m in minutes],
                             dtype=torch.bool)
-        if not mask.any():
-            continue
-        q_band = encode_game_rank_band(batch)
-        n_kept = int(mask.sum().item())
-        keys_list.append(keys[mask].cpu())
-        mins_list.append(minutes[mask].cpu())
-        bands_list.append(torch.full((n_kept,), q_band, dtype=torch.int64))
-        bw_list.append(torch.full((n_kept,), int(blue_win.item()), dtype=torch.int8))
-        mid_list.extend([holdout_match_ids[i]] * n_kept)
+        if mask.any():
+            q_band = encode_game_rank_band(batch)
+            n_kept = int(mask.sum().item())
+            keys_list.append(keys[mask].cpu())
+            mins_list.append(minutes[mask].cpu())
+            bands_list.append(torch.full((n_kept,), q_band, dtype=torch.int64))
+            bw_list.append(torch.full((n_kept,), int(blue_win.item()), dtype=torch.int8))
+            mid_list.extend([holdout_match_ids[i]] * n_kept)
+        done = i + 1
+        if log_every and (done % log_every == 0 or done == total):
+            print(f"[m4_eval] {log_label}: encoded {done}/{total} games", flush=True)
 
     if not keys_list:
         return empty

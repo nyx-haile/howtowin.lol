@@ -245,3 +245,83 @@ def test_query_index_returns_distinct_cohorts():
     # Distances must be monotonically non-decreasing across the k axis.
     diffs = dists[:, 1:] - dists[:, :-1]
     assert (diffs >= -1e-5).all()
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz) — the query loops used to run silent, so a
+# multi-hour eval sweep was indistinguishable from a hang.
+# ---------------------------------------------------------------------------
+
+
+def _progress_bundle(N: int = 64, *, with_bands: bool = False):
+    from model.retrieval import IndexBundle, KEY_DIM, SCHEMA_VERSION, Whitener
+    torch.manual_seed(3)
+    corpus_raw = torch.randn(N, KEY_DIM)
+    w = Whitener.fit(corpus_raw)
+    return IndexBundle(
+        corpus_white=w.apply(corpus_raw),
+        whitener=w,
+        row_match_id=[f"M{i}" for i in range(N)],
+        row_anchor_minute=torch.zeros(N, dtype=torch.int64),
+        row_blue_win=torch.zeros(N, dtype=torch.int8),
+        checkpoint_sha="x", code_sha="y", built_at=0,
+        row_rank_band=(
+            torch.zeros(N, dtype=torch.int8) if with_bands else None
+        ),
+        schema_version=SCHEMA_VERSION if with_bands else 1,
+    )
+
+
+def test_query_index_emits_progress_lines(capsys):
+    from model.retrieval import KEY_DIM, query_index
+
+    bundle = _progress_bundle()
+    q = torch.randn(8, KEY_DIM)
+    query_index(bundle, q, k=4, device="cpu", batch_size=2)
+
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if "query_index:" in ln]
+    assert lines, f"expected progress output, got: {out!r}"
+    assert "[retrieval] query_index: batch 4/4" in out
+    assert "queries=8/8" in out
+
+
+def test_query_index_single_batch_stays_silent(capsys):
+    """The interactive lesson path issues one batch — it must not print."""
+    from model.retrieval import KEY_DIM, query_index
+
+    bundle = _progress_bundle()
+    q = torch.randn(8, KEY_DIM)
+    query_index(bundle, q, k=4, device="cpu", batch_size=256)
+
+    assert "query_index:" not in capsys.readouterr().out
+
+
+def test_query_index_skill_aware_emits_progress_lines(capsys):
+    from model.retrieval import KEY_DIM, query_index_skill_aware
+
+    bundle = _progress_bundle(with_bands=True)
+    q = torch.randn(6, KEY_DIM)
+    query_index_skill_aware(
+        bundle, q, k=4,
+        query_rank_bands=torch.zeros(6, dtype=torch.long),
+        device="cpu", batch_size=2,
+    )
+
+    out = capsys.readouterr().out
+    assert "[retrieval] query_index_skill_aware: batch 3/3" in out
+    assert "queries=6/6" in out
+
+
+def test_query_index_skill_aware_single_batch_stays_silent(capsys):
+    from model.retrieval import KEY_DIM, query_index_skill_aware
+
+    bundle = _progress_bundle(with_bands=True)
+    q = torch.randn(6, KEY_DIM)
+    query_index_skill_aware(
+        bundle, q, k=4,
+        query_rank_bands=torch.zeros(6, dtype=torch.long),
+        device="cpu", batch_size=64,
+    )
+
+    assert "query_index_skill_aware:" not in capsys.readouterr().out

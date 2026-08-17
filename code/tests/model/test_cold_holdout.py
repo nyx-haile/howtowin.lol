@@ -56,3 +56,20 @@ def test_no_overlap_with_game_cold_holdout():
 
 def test_constant_path_points_into_splits_dir():
     assert "data/splits/plan_b_cold_holdout.txt" in str(COLD_HOLDOUT_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz) — the k-expansion / trim search issues one DB
+# query per step and used to run entirely silent.
+# ---------------------------------------------------------------------------
+
+
+def test_build_player_cold_holdout_emits_progress(capsys):
+    puuids, matches = build_player_cold_holdout()
+    out = capsys.readouterr().out
+    if not puuids and not matches:
+        # Empty corpus — nothing to report on.
+        return
+    assert "[cold-holdout] player-cold: puuids=" in out, out
+    assert "[cold-holdout] expand step 1: k=" in out, out
+    assert "[cold-holdout] player-cold done: puuids=" in out, out

@@ -230,6 +230,8 @@ def collect_activations_and_collapse(
     sum_anchors = 0
     post_mu_shards: list[np.ndarray] = []
     n_games = 0
+    total_games = min(int(config.sample_games), len(dataset))
+    log_every = max(1, min(50, total_games // 20)) if total_games else 1
     was_training = model.training
     model.eval()
     try:
@@ -276,26 +278,31 @@ def collect_activations_and_collapse(
                 sum_anchors += kl_flat.shape[0]
                 post_mu_shards.append(pm[am_bool].detach().cpu().numpy())
 
-            if not am_np.any():
-                continue
+            if am_np.any():
+                h = out["h"][0].detach().cpu().numpy()
+                post_mu = out["post_mu"][0].detach().cpu().numpy()
+                prior_mu = out["prior_mu"][0].detach().cpu().numpy()
+                # Retrieval key = [h || post_mu] — mirrors retrieval.encode_game_keys (read-only).
+                rk = np.concatenate([h, post_mu], axis=-1)
 
-            h = out["h"][0].detach().cpu().numpy()
-            post_mu = out["post_mu"][0].detach().cpu().numpy()
-            prior_mu = out["prior_mu"][0].detach().cpu().numpy()
-            # Retrieval key = [h || post_mu] — mirrors retrieval.encode_game_keys (read-only).
-            rk = np.concatenate([h, post_mu], axis=-1)
+                n_v = int(am_np.sum())
+                label_vec = np.full((n_v,), int(g_band[0]), dtype=np.int64)
+                for name, feat in (
+                    ("h_t", h),
+                    ("post_mu", post_mu),
+                    ("prior_mu", prior_mu),
+                    ("retrieval_key", rk),
+                ):
+                    if counts[name] < config.max_anchors_per_layer:
+                        per_layer[name].append((feat[am_np], label_vec))
+                        counts[name] += n_v
 
-            n_v = int(am_np.sum())
-            label_vec = np.full((n_v,), int(g_band[0]), dtype=np.int64)
-            for name, feat in (
-                ("h_t", h),
-                ("post_mu", post_mu),
-                ("prior_mu", prior_mu),
-                ("retrieval_key", rk),
-            ):
-                if counts[name] < config.max_anchors_per_layer:
-                    per_layer[name].append((feat[am_np], label_vec))
-                    counts[name] += n_v
+            if n_games % log_every == 0 or n_games == total_games:
+                print(
+                    f"[rank-diagnose] collect: {n_games}/{total_games} games"
+                    f"  anchors={sum_anchors}",
+                    flush=True,
+                )
     finally:
         model.train(was_training)
 
@@ -377,6 +384,8 @@ def run_swap_and_ablation(
     p_rank_only: list[float] = []
     prev_rank_lp: torch.Tensor | None = None
     n = 0
+    total_games = min(int(config.swap_sample), len(dataset))
+    log_every = max(1, min(50, total_games // 20)) if total_games else 1
 
     try:
         for batch in loader:
@@ -429,6 +438,12 @@ def run_swap_and_ablation(
             p_rank_only.append(_score_at_minute(batch, scores_ro, out_ro["anchor_mask"][0], 15))
 
             prev_rank_lp = players[..., :2].detach().clone()
+
+            if n % log_every == 0 or n == total_games:
+                print(
+                    f"[rank-diagnose] swap+ablation: {n}/{total_games} games",
+                    flush=True,
+                )
     finally:
         model.train(was_training)
 

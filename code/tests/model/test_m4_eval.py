@@ -388,3 +388,46 @@ def test_encode_game_keys_eval_is_stochastic_without_rng_replay():
         "PlanB eval keys sample z_post; do not claim B=1/B>1 batching "
         "parity without a deterministic eval or RNG-replay contract."
     )
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz) — the skill-aware query builder used to encode
+# the whole holdout silently.
+# ---------------------------------------------------------------------------
+
+
+def test_build_holdout_queries_with_meta_emits_progress(capsys, fixture_match_id):
+    from model.m4_eval import _build_holdout_queries_with_meta, MID_GAME_MINUTES
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    _build_holdout_queries_with_meta(
+        model, [fixture_match_id], idx, set(), "cpu", MID_GAME_MINUTES,
+        log_every=1,
+    )
+
+    out = capsys.readouterr().out
+    assert "[m4_eval] skill_aware: encoded 1/1 games" in out, out
+
+
+def test_build_holdout_queries_with_meta_progress_can_be_disabled(
+    capsys, fixture_match_id,
+):
+    from model.m4_eval import _build_holdout_queries_with_meta, MID_GAME_MINUTES
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    _build_holdout_queries_with_meta(
+        model, [fixture_match_id], idx, set(), "cpu", MID_GAME_MINUTES,
+        log_every=0,
+    )
+
+    assert "skill_aware:" not in capsys.readouterr().out

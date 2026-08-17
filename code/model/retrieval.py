@@ -365,7 +365,12 @@ def query_index(
     out_idx = torch.empty(Q, k, dtype=torch.long)
     out_d = torch.empty(Q, k, dtype=torch.float32)
 
-    for start in range(0, Q, batch_size):
+    # Progress cadence auto-tuned to the workload; a single-batch query (the
+    # interactive lesson path) stays silent, multi-batch eval sweeps report.
+    total_batches = (Q + batch_size - 1) // batch_size
+    log_every = max(1, min(50, total_batches // 20)) if total_batches > 1 else 0
+
+    for bi, start in enumerate(range(0, Q, batch_size), start=1):
         end = min(start + batch_size, Q)
         qb = queries_raw[start:end].to(device=device, dtype=corpus.dtype)
         qb_white = bundle.whitener.apply(qb)
@@ -394,6 +399,13 @@ def query_index(
         else:
             out_idx[start:end] = idx_top.cpu()
             out_d[start:end] = d_top.cpu()
+
+        if log_every and (bi % log_every == 0 or bi == total_batches):
+            print(
+                f"[retrieval] query_index: batch {bi}/{total_batches}"
+                f"  queries={end}/{Q}  k={k}",
+                flush=True,
+            )
 
     return out_idx, out_d
 
@@ -506,7 +518,12 @@ def query_index_skill_aware(
     penalty_t = torch.tensor(out_of_band_penalty, device=device, dtype=torch.float32)
     INF = float("inf")
 
-    for start in range(0, Q, batch_size):
+    # Progress cadence auto-tuned to the workload; a single-batch query (the
+    # interactive lesson path) stays silent, multi-batch eval sweeps report.
+    total_batches = (Q + batch_size - 1) // batch_size
+    log_every = max(1, min(50, total_batches // 20)) if total_batches > 1 else 0
+
+    for bi, start in enumerate(range(0, Q, batch_size), start=1):
         end = min(start + batch_size, Q)
         b = end - start
 
@@ -643,6 +660,13 @@ def query_index_skill_aware(
         eff_k[start:end] = eff_k_b.cpu()
         stage[start:end] = stage_b.cpu()
         in_band[start:end] = in_band_b.cpu()
+
+        if log_every and (bi % log_every == 0 or bi == total_batches):
+            print(
+                f"[retrieval] query_index_skill_aware: batch {bi}/{total_batches}"
+                f"  queries={end}/{Q}  k={k}",
+                flush=True,
+            )
 
     info = {
         "effective_k_per_query": eff_k,

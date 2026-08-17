@@ -76,15 +76,29 @@ def build_player_cold_holdout(target_fraction: float = PLAYER_COLD_GAMES_FRACTIO
         target_games = int(total_matches * target_fraction)
         upper_games = int(total_matches * target_fraction * (1 + PLAYER_COLD_TOLERANCE))
 
+        print(
+            f"[cold-holdout] player-cold: puuids={len(all_puuids)} "
+            f"total_matches={total_matches} target_games={target_games} "
+            f"upper_games={upper_games}",
+            flush=True,
+        )
+
         # Binary-ish expansion — exponential growth then linear trim.
         lo, hi = 1, len(all_puuids)
         chosen_k = hi
         matches: set[str] = set()
 
         k = max(1, target_games // 20)  # seed: assume ~20 games/puuid average
+        n_expand = 0
         while k <= hi:
             candidate = set(all_puuids[:k])
             m = _matches_for_puuids(conn, list(candidate))
+            n_expand += 1
+            print(
+                f"[cold-holdout] expand step {n_expand}: k={k}/{hi} "
+                f"matches={len(m)}/{target_games}",
+                flush=True,
+            )
             if len(m) >= target_games:
                 chosen_k = k
                 matches = m
@@ -94,13 +108,28 @@ def build_player_cold_holdout(target_fraction: float = PLAYER_COLD_GAMES_FRACTIO
             # Did not reach target — use all puuids (should not happen)
             chosen_k = hi
             matches = _matches_for_puuids(conn, list(all_puuids))
+            print(
+                f"[cold-holdout] expand exhausted: using all {hi} puuids "
+                f"matches={len(matches)}",
+                flush=True,
+            )
 
         # Trim back if over upper bound.
         if len(matches) > upper_games and chosen_k > 1:
+            trim_start = chosen_k
+            log_every = max(1, min(50, trim_start // 20))
+            n_trim = 0
             while chosen_k > 1:
                 chosen_k -= 1
+                n_trim += 1
                 candidate = set(all_puuids[:chosen_k])
                 m = _matches_for_puuids(conn, list(candidate))
+                if n_trim % log_every == 0:
+                    print(
+                        f"[cold-holdout] trim step {n_trim}: k={chosen_k}/{trim_start} "
+                        f"matches={len(m)} (target={target_games})",
+                        flush=True,
+                    )
                 if len(m) < target_games:
                     # Went too far; step back up.
                     chosen_k += 1
@@ -108,8 +137,18 @@ def build_player_cold_holdout(target_fraction: float = PLAYER_COLD_GAMES_FRACTIO
                     matches = _matches_for_puuids(conn, list(candidate))
                     break
                 matches = m
+            print(
+                f"[cold-holdout] trim done after {n_trim} steps: k={chosen_k} "
+                f"matches={len(matches)}",
+                flush=True,
+            )
 
         chosen_puuids = set(all_puuids[:chosen_k])
+        print(
+            f"[cold-holdout] player-cold done: puuids={chosen_k} "
+            f"matches={len(matches)}",
+            flush=True,
+        )
     finally:
         conn.close()
     return chosen_puuids, matches
