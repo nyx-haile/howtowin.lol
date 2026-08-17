@@ -44,10 +44,48 @@ The streak advances on intervention commit, not on app-open. Reflect that in the
 
 ## Audit
 
-Spot-check before PR: grep the preview routes for the banned phrase list. No hits.
+The banned-phrase table is enforced mechanically. `site/eslint-rules/no-epistemic-overclaim.js`
+is a local ESLint rule that transcribes the table above (plus the two hard "never" lines from
+§Copy around streaks and §Push copy) and fails the build on a hit.
+
+```
+cd site && bun run check:epistemic-rule
+```
+
+That script is `eslint src/lib/lesson src/routes/review` — the same two paths the flat config
+scopes the rule to in `site/eslint.config.js`. The rest of the site is deliberately **not**
+covered: the hedge rule is a pedagogy-surface rule, and widening it would turn marketing copy
+into lint failures.
+
+What the rule inspects, and what it deliberately does not:
+
+| Node type | Covers |
+|---|---|
+| `Literal` | plain `'...'` / `"..."` strings in `.ts` / `.js` and in `<script>` blocks |
+| `TemplateElement` | the static chunks of a `` `...` `` template literal |
+| `SvelteText` | raw text between tags in a `.svelte` template |
+| `SvelteLiteral` | Svelte attribute-value text |
+
+**Comments are exempt.** JS/TS line and block comments and Svelte `<!-- ... -->` comments are
+range-checked out, which is why the "this ward would have saved you" example in the
+`epistemic.ts` header doc-comment does not trip the rule. This is also why the guide's old
+`rg` recipe needed a "hits in `epistemic.ts` are fine" caveat and the lint rule does not.
+
+Two escape hatches, both in the rule's options schema:
+
+- `allow: ['...']` — literal substrings that suppress the rule for the chunk containing them.
+  For prose that legitimately quotes a banned phrase outside a comment.
+- `disablePhrases: ['you-will']` — turn off one row of the table by its id.
+
+Prefer neither. The right fix for a real hit is (a) rewording or (b) routing the claim through
+`hedge()`. The rule is defense-in-depth *behind* the helper, not a substitute for it — it can
+only catch phrases someone wrote by hand, so a claim that skips `hedge()` while avoiding every
+banned phrase still gets through. `hedge()` remains the load-bearing control.
+
+The old grep still works as a quick manual spot-check:
 
 ```
 rg -n "you will|would have|should always|correct answer" site/src/routes/review/preview site/src/lib/lesson
 ```
 
-Hits in `epistemic.ts`, `schema.ts`, and this guide are fine (they're the rule source). Hits anywhere else need either (a) rewording or (b) routing through `hedge()`.
+_Rule added 2026-08-17 (htw-9ip)._
