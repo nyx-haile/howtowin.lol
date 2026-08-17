@@ -415,14 +415,20 @@ def test_encode_game_keys_batched_matches_b1_under_deterministic_reparam(
         assert torch.equal(blue_win_b, blue_win_1)
 
 
-def test_encode_game_keys_batched_is_row_order_invariant(
+def test_encode_game_keys_batched_identical_rows_encode_identically(
     monkeypatch, fixture_match_id,
 ):
-    """Two identical games in one batch encode bitwise-identically.
+    """Two *identical* games in one batch encode bitwise-identically.
 
-    This is the structural half of the parity claim, and unlike the B=1 vs B>1
-    comparison it needs no tolerance: same batch, same kernel, same reduction
-    order. It fails loudly if rows are ever mixed up during anchor_mask slicing.
+    This is a determinism check, and unlike the B=1 vs B>1 comparison it needs
+    no tolerance: same batch, same kernel, same reduction order.
+
+    It does NOT prove anything about row alignment. Identical inputs make every
+    row of ``keys_all`` identical, so any permutation of rows is invisible here
+    — a mutation replacing ``keys_all[bi]`` with ``keys_all[0]`` leaves this
+    test green. The row-alignment guard is
+    ``test_encode_game_keys_batched_keys_belong_to_their_own_row``, which
+    batches two genuinely distinct games; do not weaken it into this one.
     """
     import model.plan_b_model as plan_b_model_module
     from model.dataset import MatchDataset, build_puuid_index, collate_games
@@ -442,6 +448,101 @@ def test_encode_game_keys_batched_is_row_order_invariant(
     per_game = encode_game_keys_batched(model, collate_games([full, full]))
     assert torch.equal(per_game[0][0], per_game[1][0])
     assert torch.equal(per_game[0][1], per_game[1][1])
+
+
+def _first_distinct_match_ids(all_match_ids, count=2):
+    """The first ``count`` distinct match_ids in the corpus, else skip.
+
+    Same helper as tests/model/test_baselines_static_only.py — kept local so
+    this file has no cross-test-module import.
+    """
+    out = []
+    for mid in all_match_ids:
+        if mid not in out:
+            out.append(mid)
+        if len(out) == count:
+            return out
+    pytest.skip(f"need at least {count} distinct fixture matches")
+
+
+def test_encode_game_keys_batched_keys_belong_to_their_own_row(
+    monkeypatch, all_match_ids,
+):
+    """Row ``bi``'s keys come from game ``bi``, not from a neighbouring row.
+
+    This is the cross-row contamination guard, and it is the ONLY test in this
+    file that can see one. The rest of the batched-encoder suite batches games
+    that are indistinguishable at the key level:
+
+    - ``..._identical_rows_encode_identically`` batches ``[full, full]``.
+    - ``..._matches_b1_under_deterministic_reparam`` batches ``[full, short]``
+      where ``_truncate_anchors`` keeps the *first* n anchors — a causal prefix
+      of the same match, so ``keys_all[0][:n]`` genuinely equals the short
+      game's keys.
+    - test_m4_eval's batching tests feed N copies of one sample.
+
+    Under all of those, mutating ``keys_all[bi]`` to ``keys_all[0]`` in
+    ``encode_game_keys_batched`` is a silent no-op. Two *different* matches
+    make it O(1) loud. The distinctness precondition below is asserted, not
+    assumed, so this test cannot silently decay into another no-op if the
+    fixture corpus ever changes.
+
+    ``reparameterize`` is monkeypatched to its mean for the same reason as the
+    B=1 parity test — eval keys sample ``z_post``, so raw re-encodings never
+    match. See test_m4_eval.py::
+    ``test_encode_game_keys_eval_is_stochastic_without_rng_replay``.
+    """
+    import model.plan_b_model as plan_b_model_module
+    from model.dataset import MatchDataset, build_puuid_index, collate_games
+    from model.plan_b_model import PlanBModel
+    from model.retrieval import encode_game_keys, encode_game_keys_batched
+
+    monkeypatch.setattr(
+        plan_b_model_module, "reparameterize", lambda mu, logvar: mu,
+    )
+
+    match_ids = _first_distinct_match_ids(all_match_ids, count=2)
+    idx = build_puuid_index(match_ids)
+    ds = MatchDataset(match_ids, puuid_index=idx)
+    samples = [ds[0], ds[1]]  # ds[i] is match_ids[i] — MatchDataset keeps order
+
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    solo = [encode_game_keys(model, collate_games([s])) for s in samples]
+    batched = encode_game_keys_batched(model, collate_games(samples))
+    assert len(batched) == len(samples)
+
+    # Precondition: the two games must actually differ over their common
+    # anchor prefix. If they did not, a row swap would be undetectable and
+    # every assertion below would pass vacuously.
+    overlap = min(solo[0][0].shape[0], solo[1][0].shape[0])
+    assert overlap > 0, "both fixture games need at least one valid anchor"
+    cross = (solo[0][0][:overlap] - solo[1][0][:overlap]).abs().max().item()
+    assert cross > 1e-2, (
+        f"fixture games {match_ids} encode to near-identical keys "
+        f"(max abs diff {cross:.3e}) — this test cannot detect a row swap "
+        "against them; pick two genuinely different matches"
+    )
+
+    for gi, (keys_1, minutes_1, blue_win_1) in enumerate(solo):
+        keys_b, minutes_b, blue_win_b = batched[gi]
+        assert keys_b.shape == keys_1.shape, (
+            f"row {gi} ({match_ids[gi]}): batched keys have shape "
+            f"{tuple(keys_b.shape)}, own-game B=1 keys {tuple(keys_1.shape)}"
+        )
+        diff = (keys_b - keys_1).abs().max().item()
+        # Tolerance is the float32 batched-GEMM noise floor from the B=1
+        # parity test (~5e-5). A row swap moves keys by `cross` (O(1e-1)+),
+        # three orders of magnitude above this bound.
+        assert diff < 2e-4, (
+            f"row {gi} ({match_ids[gi]}): max abs key diff {diff:.3e} vs its "
+            f"OWN B=1 encoding. Cross-game distance is {cross:.3e}, so this is "
+            "row contamination, not float noise — check the keys_all[bi] "
+            "indexing in encode_game_keys_batched"
+        )
+        assert torch.equal(minutes_b, minutes_1), f"row {gi} minutes crossed"
+        assert torch.equal(blue_win_b, blue_win_1), f"row {gi} outcome crossed"
 
 
 def test_encode_game_keys_batched_runs_one_forward_per_batch():
