@@ -23,7 +23,9 @@ from pathlib import Path
 
 import torch
 
-_CACHE_DIR = (Path(os.path.dirname(__file__)) / ".." / ".." / "data" / "retrieval" / "cache").resolve()
+from runtime_paths import resolve_runtime_paths
+
+_CACHE_DIR = resolve_runtime_paths().cache_root
 
 _MODEL_MODULES = ["encoders.py", "rssm.py", "plan_b_model.py", "dataset.py", "retrieval.py"]
 _FF_MODULES = [os.path.join("baselines", "frame_features_index.py")]

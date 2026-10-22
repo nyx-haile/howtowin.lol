@@ -17,21 +17,16 @@ import torch
 from torch.utils.data import Dataset
 
 from db import get_conn
+from runtime_paths import resolve_runtime_paths
 
 _sample_conn_local = threading.local()
 
 
 def _get_sample_conn():
     """Thread-local read-only connection for DataLoader workers. Never call close() on the result."""
-    from db import _resolve_db_path
-    resolved = _resolve_db_path()
     conn = getattr(_sample_conn_local, "conn", None)
     if conn is None:
-        import sqlite3
-        conn = sqlite3.connect(resolved)
-        conn.row_factory = __import__("sqlite3").Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        conn = get_conn(readonly=True)
         _sample_conn_local.conn = conn
     return conn
 from raw_db import get_raw_match_only
@@ -114,7 +109,7 @@ OBJECTIVE_EVENT_TYPES_SQL = (
     "TURRET_PLATE_DESTROYED",
 )
 
-SPLIT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'splits')
+SPLIT_DIR = str(resolve_runtime_paths().split_dir)
 INCLUDE_LEGACY_LABELS_ENV = "HOWL_PLANB_INCLUDE_LEGACY_LABELS"
 
 
@@ -127,7 +122,8 @@ def _env_flag(name, default=False):
 
 def load_split(name):
     """name in {'holdout', 'train', 'cold'}."""
-    holdout_path = os.path.join(SPLIT_DIR, 'plan_a_holdout.txt')
+    split_dir = str(resolve_runtime_paths().split_dir)
+    holdout_path = os.path.join(split_dir, 'plan_a_holdout.txt')
     with open(holdout_path) as f:
         holdout = [line.strip() for line in f if line.strip()]
 
@@ -137,7 +133,7 @@ def load_split(name):
     if name == 'holdout':
         return holdout
 
-    conn = get_conn()
+    conn = get_conn(readonly=True)
     try:
         all_ids = [r["match_id"] for r in conn.execute("SELECT match_id FROM games").fetchall()]
     finally:

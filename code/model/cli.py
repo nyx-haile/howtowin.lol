@@ -16,6 +16,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from runtime_paths import artifact_path as resolve_artifact_path, resolve_runtime_paths
 from model.dataset import (
     MatchDataset, collate_games, load_split, build_puuid_index,
 )
@@ -101,7 +102,8 @@ def cmd_plan_b_train(args):
                       materialized_cache_version=args.materialized_cache_version,
                       materialized_cache_warmup=args.materialized_cache_warmup,
                       checkpoint_tag="plan_b_full",
-                      compile_model=args.compile_model)
+                      compile_model=args.compile_model,
+                      max_steps=args.max_steps)
 
 
 def cmd_plan_b_eval(args):
@@ -109,9 +111,7 @@ def cmd_plan_b_eval(args):
     from model.plan_b_eval import (
         outcome_auc_by_minute, imagination_rollout_top5, frozen_minute_0_auc,
     )
-    ckpt_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "data", "model_checkpoints",
-        "plan_b_full_best.pt")
+    ckpt_path = str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     ckpt = torch.load(ckpt_path, weights_only=False)
     max_puuids = ckpt.get("max_puuids", 20000)
 
@@ -161,16 +161,13 @@ def cmd_skill_retrieval_eval(args):
         run_skill_aware_eval, write_retrieval_eval_artifact,
     )
 
-    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt_path = args.checkpoint or str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     index_path = args.index_path or DEFAULT_INDEX_PATH
 
     if args.artifact_path:
         artifact_path = args.artifact_path
     else:
-        artifact_path = os.path.join(
-            os.path.dirname(__file__), "..", "..",
-            "artifacts", "retrieval_eval.json",
-        )
+        artifact_path = str(resolve_artifact_path("retrieval_eval.json"))
 
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
     max_puuids = ckpt.get("max_puuids", 20000)
@@ -274,14 +271,11 @@ def cmd_intervention_scan(args):
         DEFAULT_ROLLOUT_STEPS, JS_DIVERGENCE_FLOOR, JS_DIVERGENCE_SIGNAL_THRESHOLD,
     )
 
-    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt_path = args.checkpoint or str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     if args.artifact_path:
         artifact_path = args.artifact_path
     else:
-        artifact_path = os.path.join(
-            os.path.dirname(__file__), "..", "..",
-            "artifacts", "intervention_candidates.json",
-        )
+        artifact_path = str(resolve_artifact_path("intervention_candidates.json"))
 
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
     max_puuids = ckpt.get("max_puuids", 20000)
@@ -352,10 +346,8 @@ def cmd_causal_filter(args):
     from model.causal_eval import run_causal_filter, write_causal_filter_report
     from model.plan_b_model import PlanBModel
 
-    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
-    repo_artifacts = os.path.join(
-        os.path.dirname(__file__), "..", "..", "artifacts",
-    )
+    ckpt_path = args.checkpoint or str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
+    repo_artifacts = str(resolve_runtime_paths().report_artifact_root)
     candidate_path = args.candidate_path or os.path.join(
         repo_artifacts, "intervention_candidates.json",
     )
@@ -434,13 +426,11 @@ def cmd_diagnose_rank(args):
     """
     from model.rank_diagnostics import run_gate_b_diagnosis
 
-    ckpt_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt_path = args.checkpoint or str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     if args.artifact_path:
         artifact_path = args.artifact_path
     else:
-        artifact_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "artifacts", "rank_diagnosis.json",
-        )
+        artifact_path = str(resolve_artifact_path("rank_diagnosis.json"))
     run_gate_b_diagnosis(
         checkpoint_path=ckpt_path,
         split=args.split,
@@ -471,7 +461,7 @@ def cmd_retrieval_build(args):
         build_index, save_index, DEFAULT_INDEX_PATH, INDEX_DIR,
     )
 
-    ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt_path = str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
     max_puuids = ckpt.get("max_puuids", 20000)
     sha = _checkpoint_sha_short(ckpt_path)
@@ -538,7 +528,7 @@ def cmd_retrieval_eval(args):
         delete_cached, load_cached_keys, load_cached_cohort_idx,
     )
 
-    ckpt_path = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
+    ckpt_path = str(resolve_runtime_paths().checkpoint_dir / "plan_b_full_best.pt")
     ckpt = _t.load(ckpt_path, map_location="cpu", weights_only=False)
     max_puuids = ckpt.get("max_puuids", 20000)
 
@@ -574,7 +564,7 @@ def cmd_retrieval_eval(args):
         so_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_static_only_index.pt"))
         ff_bundle = load_index(os.path.join(INDEX_DIR, "plan_b_frame_features_index.pt"))
 
-    ckpt_sha = model_bundle.checkpoint_sha
+    ckpt_sha = getattr(model_bundle, "checkpoint_sha", ckpt.get("git_sha", "unknown"))
     holdout_pairs = [("game_cold", val), ("player_cold", cold)]
 
     # --rebuild-cache: wipe cache files for all kinds × all holdouts before running.
@@ -627,7 +617,7 @@ def cmd_retrieval_eval(args):
             print(f"[retrieval-eval] --diagnostic-only: loaded cache for {label} "
                   f"(n_queries={results[label]['n_queries']})")
 
-        report_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docs")
+        report_dir = str(resolve_runtime_paths().report_artifact_root)
         diag_path = os.path.join(
             report_dir, f"m4_cohort_minute_diagnostic_{date.today().isoformat()}.md",
         )
@@ -667,9 +657,7 @@ def cmd_retrieval_eval(args):
     print(f"\nM4 GATE: {'PASS' if passed else 'FAIL'} "
           f"(headline_k={HEADLINE_K}, threshold={HEADLINE_GATE_BITS} bits)")
 
-    report_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "docs",
-    )
+    report_dir = str(resolve_runtime_paths().report_artifact_root)
     report_path = os.path.join(
         report_dir, f"m4_retrieval_eval_report_{date.today().isoformat()}.md",
     )
@@ -707,6 +695,7 @@ def _print_eval_result(r: dict) -> None:
 
 def _write_report(path: str, results: dict, passed: bool) -> None:
     from datetime import date
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     lines = [
         "# M4 Retrieval-Check Eval Report",
         "",
@@ -810,6 +799,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pb_tr.add_argument("--lr", type=float, default=3e-4)
     p_pb_tr.add_argument("--max-puuids", type=int, default=20000, dest="max_puuids")
     p_pb_tr.add_argument("--log-every", type=int, default=10, dest="log_every")
+    p_pb_tr.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        dest="max_steps",
+        help="Stop after this many optimizer steps. Intended for bounded smoke runs.",
+    )
     p_pb_tr.add_argument("--num-workers", type=int, default=None, dest="num_workers")
     p_pb_tr.add_argument("--prefetch-factor", type=int, default=None, dest="prefetch_factor")
     p_pb_tr.add_argument(
@@ -846,7 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pb_tr.add_argument(
         "--preflight-artifact",
-        default=os.path.join(os.path.dirname(__file__), "..", "..", "artifacts", "runtime_preflight.json"),
+        default=str(resolve_artifact_path("runtime_preflight.json")),
         dest="preflight_artifact",
         help="Path for Gate-A runtime preflight JSON artifact.",
     )

@@ -36,6 +36,7 @@ def test_plan_b_train_cli_forwards_runtime_knobs(monkeypatch):
             "--no-persistent-workers",
             "--loader-order", "out-of-order",
             "--train-cache-size", "0",
+            "--max-steps", "2",
         ]
     )
 
@@ -51,6 +52,7 @@ def test_plan_b_train_cli_forwards_runtime_knobs(monkeypatch):
     assert captured["kwargs"]["persistent_workers"] is False
     assert captured["kwargs"]["loader_order"] == "out-of-order"
     assert captured["kwargs"]["train_cache_size"] == 0
+    assert captured["kwargs"]["max_steps"] == 2
 
 
 def test_plan_b_train_cli_forwards_preflight_and_cache_knobs(monkeypatch):
@@ -91,6 +93,14 @@ def test_plan_b_train_cli_forwards_preflight_and_cache_knobs(monkeypatch):
     assert kw["materialized_cache_mode"] == "readwrite"
     assert kw["materialized_cache_version"] == "v1-remote"
     assert kw["materialized_cache_warmup"] is True
+
+
+def test_plan_b_train_cli_default_preflight_artifact_uses_output_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOWL_OUTPUT_ROOT", str(tmp_path))
+
+    args = cli.build_parser().parse_args(["plan-b-train"])
+
+    assert args.preflight_artifact == str(tmp_path / "artifacts" / "runtime_preflight.json")
 
 
 def test_retrieval_eval_parser_exposes_runtime_knobs():

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from model.dataset import MatchDataset, build_puuid_index
+from model.sample_materialization import resolve_materialized_sample_cache_config
 
 
 def _assert_samples_equal(lhs, rhs):
@@ -105,6 +106,20 @@ def test_materialized_sample_version_changes_cache_location(fixture_match_id, tm
     )
 
     assert ds_v1.materialized_sample_cache.cache_path_for(fixture_match_id) != ds_v2.materialized_sample_cache.cache_path_for(fixture_match_id)
+
+
+def test_materialized_cache_defaults_to_output_root_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.delenv("HOWL_PLANB_SAMPLE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("HOWL_OUTPUT_ROOT", str(tmp_path))
+
+    config = resolve_materialized_sample_cache_config(
+        puuid_index={},
+        exclude_match_ids=set(),
+        mode="readwrite",
+    )
+
+    assert config.enabled is True
+    assert config.cache_dir == str(tmp_path / "data" / "materialized_samples" / "plan_b")
 
 
 def test_core_materialized_sample_omits_legacy_labels_but_still_collates(fixture_match_id, tmp_path):

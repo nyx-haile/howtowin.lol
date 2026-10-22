@@ -17,10 +17,38 @@ Plan B spec section B2.
 import hashlib
 import os
 from db import get_conn
+from runtime_paths import resolve_runtime_paths
 
-SPLIT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "splits")
+SPLIT_DIR = str(resolve_runtime_paths().split_dir)
 COLD_HOLDOUT_PATH = os.path.join(SPLIT_DIR, "plan_b_cold_holdout.txt")
 GAME_HOLDOUT_PATH = os.path.join(SPLIT_DIR, "plan_a_holdout.txt")
+GENERATED_SPLIT_DIR = str(resolve_runtime_paths().output_root / "data" / "splits")
+GENERATED_COLD_HOLDOUT_PATH = os.path.join(GENERATED_SPLIT_DIR, "plan_b_cold_holdout.txt")
+GENERATED_GAME_HOLDOUT_PATH = os.path.join(GENERATED_SPLIT_DIR, "plan_a_holdout.txt")
+
+
+def input_split_dir() -> str:
+    return str(resolve_runtime_paths().split_dir)
+
+
+def generated_split_dir() -> str:
+    return str(resolve_runtime_paths().output_root / "data" / "splits")
+
+
+def input_cold_holdout_path() -> str:
+    return os.path.join(input_split_dir(), "plan_b_cold_holdout.txt")
+
+
+def input_game_holdout_path() -> str:
+    return os.path.join(input_split_dir(), "plan_a_holdout.txt")
+
+
+def generated_cold_holdout_path() -> str:
+    return os.path.join(generated_split_dir(), "plan_b_cold_holdout.txt")
+
+
+def generated_game_holdout_path() -> str:
+    return os.path.join(generated_split_dir(), "plan_a_holdout.txt")
 
 # Target fraction of total matches in each holdout. Train = 1 - 2*fraction.
 PLAYER_COLD_GAMES_FRACTION = 0.10
@@ -65,7 +93,7 @@ def build_player_cold_holdout(target_fraction: float = PLAYER_COLD_GAMES_FRACTIO
     set is approximately `target_fraction` of all matches. K is scaled
     iteratively to reach the target without massive overshoot.
     """
-    conn = get_conn()
+    conn = get_conn(readonly=True)
     try:
         all_puuids = _fetch_all_puuids(conn)
         all_puuids.sort(key=_sha1_rank)
@@ -161,7 +189,7 @@ def build_game_cold_holdout(
     """Deterministic uniform sample via SHA1(match_id) mod N. `exclude`
     typically contains the player-cold match ids; we sample from the rest.
     """
-    conn = get_conn()
+    conn = get_conn(readonly=True)
     try:
         all_ids = _fetch_all_match_ids(conn)
     finally:
@@ -175,9 +203,10 @@ def build_game_cold_holdout(
 
 
 def save_player_cold_holdout(
-    path: str = COLD_HOLDOUT_PATH,
+    path: str | os.PathLike[str] | None = None,
     target_fraction: float = PLAYER_COLD_GAMES_FRACTION,
 ) -> tuple[set[str], set[str]]:
+    path = str(path or generated_cold_holdout_path())
     puuids, match_ids = build_player_cold_holdout(target_fraction=target_fraction)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -187,10 +216,11 @@ def save_player_cold_holdout(
 
 
 def save_game_cold_holdout(
-    path: str = GAME_HOLDOUT_PATH,
+    path: str | os.PathLike[str] | None = None,
     exclude: set[str] | None = None,
     fraction: float = GAME_COLD_FRACTION,
 ) -> set[str]:
+    path = str(path or generated_game_holdout_path())
     exclude = exclude or set()
     match_ids = build_game_cold_holdout(exclude=exclude, fraction=fraction)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -201,13 +231,13 @@ def save_game_cold_holdout(
 
 
 def load_player_cold_holdout(path: str | None = None) -> set[str]:
-    path = path or COLD_HOLDOUT_PATH
+    path = path or input_cold_holdout_path()
     with open(path) as f:
         return {line.strip() for line in f if line.strip()}
 
 
 def load_game_cold_holdout(path: str | None = None) -> set[str]:
-    path = path or GAME_HOLDOUT_PATH
+    path = path or input_game_holdout_path()
     with open(path) as f:
         return {line.strip() for line in f if line.strip()}
 
@@ -219,7 +249,7 @@ def rebuild_all_splits(
     """Regenerate both split files. Returns (player_cold_n, game_cold_n, train_n)."""
     puuids, player_cold = save_player_cold_holdout(target_fraction=player_fraction)
     game_cold = save_game_cold_holdout(exclude=player_cold, fraction=game_fraction)
-    conn = get_conn()
+    conn = get_conn(readonly=True)
     try:
         total = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
     finally:

@@ -9,14 +9,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import torch
 
-DEFAULT_SAMPLE_CACHE_DIR = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "data",
-    "materialized_samples",
-    "plan_b",
-)
+from runtime_paths import resolve_runtime_paths
+
 SAMPLE_CACHE_DIR_ENV = "HOWL_PLANB_SAMPLE_CACHE_DIR"
 SAMPLE_CACHE_MODE_ENV = "HOWL_PLANB_SAMPLE_CACHE_MODE"
 SAMPLE_CACHE_VERSION_ENV = "HOWL_PLANB_SAMPLE_CACHE_VERSION"
@@ -79,6 +73,10 @@ def _normalize_mode(mode: str | None, cache_dir: str | None) -> str:
     raise ValueError(f"unknown materialized sample cache mode: {mode!r}")
 
 
+def _default_sample_cache_dir() -> str:
+    return str(resolve_runtime_paths().materialized_sample_root)
+
+
 @dataclass(frozen=True)
 class MaterializedSampleCacheConfig:
     enabled: bool
@@ -102,7 +100,7 @@ def resolve_materialized_sample_cache_config(
     resolved_dir = cache_dir or os.environ.get(SAMPLE_CACHE_DIR_ENV)
     resolved_mode = _normalize_mode(mode, resolved_dir)
     if resolved_mode != "off" and not resolved_dir:
-        resolved_dir = DEFAULT_SAMPLE_CACHE_DIR
+        resolved_dir = _default_sample_cache_dir()
     resolved_version = str(version or os.environ.get(SAMPLE_CACHE_VERSION_ENV) or DEFAULT_SAMPLE_CACHE_VERSION)
     resolved_warmup = _flag_from_env(SAMPLE_CACHE_WARMUP_ENV, default=False) if warmup is None else bool(warmup)
     namespace = _stable_hash_bytes(

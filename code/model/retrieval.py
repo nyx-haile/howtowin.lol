@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import torch
 from torch.utils.data import DataLoader
 
+from runtime_paths import resolve_runtime_paths
 from model.dataset import MatchDataset, collate_games
 from model.rank_band import N_BANDS, game_band
 
@@ -25,9 +26,7 @@ D_H = 512
 D_Z = 32
 KEY_DIM = D_H + D_Z  # 544
 
-INDEX_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "data", "retrieval"
-)
+INDEX_DIR = str(resolve_runtime_paths().retrieval_dir)
 DEFAULT_INDEX_PATH = os.path.join(INDEX_DIR, "plan_b_index.pt")
 
 MID_GAME_MINUTES = tuple(range(10, 26))  # 10..25 inclusive

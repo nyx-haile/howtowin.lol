@@ -5,13 +5,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from runtime_paths import resolve_runtime_paths
 from model.dataset import (
     MatchDataset, collate_games, load_split, build_puuid_index,
 )
 from model.baseline import CausalTransformerBaseline
 from model.tokens import NUM_EVENT_TYPES
 
-CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'model_checkpoints')
+CHECKPOINT_DIR = str(resolve_runtime_paths().checkpoint_dir)
 
 
 def masked_bce_loss(logits, labels, mask):

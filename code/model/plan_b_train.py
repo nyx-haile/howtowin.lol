@@ -12,12 +12,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler
 
 from db import get_conn
+from runtime_paths import resolve_runtime_paths
 from model.dataset import MatchDataset, build_puuid_index, collate_games
 from model.plan_b_model import D_Z, PlanBModel
 from model.rssm import free_bits_kl
 from model.tokens import EVENT_TYPE_TO_ID, event_label_from_type_id
 
-CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "model_checkpoints")
+CHECKPOINT_DIR = str(resolve_runtime_paths().checkpoint_dir)
 FREE_BITS_PER_DIM = 0.5
 KL_WEIGHT_LOSS = 0.05
 ROLLOUT_STEPS = 3
@@ -1048,7 +1049,10 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                       materialized_cache_mode: str | None = None,
                       materialized_cache_version: str | None = None,
                       materialized_cache_warmup: bool | None = None,
-                      compile_model: bool | None = None):
+                      compile_model: bool | None = None,
+                      max_steps: int | None = None):
+    if max_steps is not None and max_steps <= 0:
+        raise ValueError("max_steps must be positive when provided")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     puuid_index = build_puuid_index(train_match_ids, max_puuids=max_puuids)
 
@@ -1157,6 +1161,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
     best_cold_auc = -1.0
     patience_left = EARLY_STOP_PATIENCE
     best_path = os.path.join(CHECKPOINT_DIR, f"{checkpoint_tag}_best.pt")
+    total_optimizer_steps = 0
 
     if batch_size > 1 and len(train_ds) > batch_size:
         batch_sampler = BucketedBatchSampler(
@@ -1232,6 +1237,7 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
+            total_optimizer_steps += 1
             ep_core_loss_sum = ep_core_loss_sum + _combined_loss(losses, 0.0).detach()
             ep_loss_sum = ep_loss_sum + loss.detach()
             n_batches += 1
@@ -1245,6 +1251,8 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                     f"avg_step={avg_step:.2f}s  eta={eta:.1f}s",
                     flush=True,
                 )
+            if max_steps is not None and total_optimizer_steps >= max_steps:
+                break
         ep_core_loss = float(ep_core_loss_sum.item()) / max(1, n_batches)
         ep_total_loss = float(ep_loss_sum.item()) / max(1, n_batches)
         history["train_loss"].append(ep_core_loss)
@@ -1300,5 +1308,9 @@ def plan_b_train_loop(train_match_ids, val_match_ids, cold_match_ids,
                     flush=True,
                 )
                 break
+
+        if max_steps is not None and total_optimizer_steps >= max_steps:
+            print(f"max_steps={max_steps} reached; stopping training loop", flush=True)
+            break
 
     return history

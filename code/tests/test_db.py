@@ -2,6 +2,7 @@ import os
 import sys
 import sqlite3
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -168,3 +169,35 @@ def test_event_queries_use_match_timestamp_index_without_temp_sort():
         assert any('idx_events_match_ts' in d or 'idx_events_objective_match_ts' in d for d in objective_details)
         assert all('USE TEMP B-TREE' not in d for d in meaningful_details)
         assert all('USE TEMP B-TREE' not in d for d in objective_details)
+
+
+def test_readonly_uri_reads_main_db_and_rejects_writes_without_wal_sidecar():
+    with tempfile.TemporaryDirectory() as tmp:
+        test_path = os.path.join(tmp, 'readonly.db')
+        db.init_db(test_path)
+        conn = db.get_conn(test_path)
+        db.insert_game(conn, 'NA1_readonly', '14.15', 420, 1800, 100, 1700000000)
+        conn.commit()
+        conn.close()
+
+        wal_path = test_path + '-wal'
+        if os.path.exists(wal_path):
+            os.remove(wal_path)
+
+        readonly_uri = f"{Path(test_path).as_uri()}?mode=ro&immutable=1"
+        conn = db.get_conn(readonly_uri)
+        try:
+            row = conn.execute("SELECT winning_team FROM games WHERE match_id = ?", ('NA1_readonly',)).fetchone()
+            assert row['winning_team'] == 100
+            assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+            try:
+                db.insert_game(conn, 'NA1_blocked', '14.15', 420, 1800, 200, 1700000001)
+                conn.commit()
+            except sqlite3.DatabaseError:
+                pass
+            else:
+                raise AssertionError("read-only connection allowed a write")
+        finally:
+            conn.close()
+
+        assert not os.path.exists(wal_path)

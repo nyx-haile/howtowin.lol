@@ -24,6 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
 from db import get_conn
+from runtime_paths import artifact_path as resolve_artifact_path
 from model.dataset import collate_games
 from model.rank_band import (
     BAND_NAMES,
@@ -526,7 +527,7 @@ def run_gate_b_diagnosis(
     sample_games: int = 500,
     swap_sample: int = 500,
     max_anchors_per_layer: int = 30000,
-    artifact_path: str = "artifacts/rank_diagnosis.json",
+    artifact_path: str | None = None,
     device: str | None = None,
     band_stratified: bool = True,
     per_band_cap: int = 250,
@@ -535,6 +536,7 @@ def run_gate_b_diagnosis(
     from model.plan_b_model import PlanBModel
     from model.dataset import MatchDataset, build_puuid_index, load_split
 
+    artifact_path = artifact_path or str(resolve_artifact_path("rank_diagnosis.json"))
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[rank-diagnose] device={device} checkpoint={checkpoint_path}", flush=True)
 
