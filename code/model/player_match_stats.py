@@ -64,6 +64,13 @@ def ensure_player_match_stats(conn=None):
             conn.close()
         return
 
+    query_only = bool(conn.execute("PRAGMA query_only").fetchone()[0])
+    if query_only:
+        _ready_db_paths.add(db_path)
+        if own_conn:
+            conn.close()
+        return
+
     conn.executescript(DDL)
 
     total_matches = _source_match_count(conn)

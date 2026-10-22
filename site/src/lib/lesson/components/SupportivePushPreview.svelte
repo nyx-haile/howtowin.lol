@@ -13,6 +13,10 @@
 		},
 		{
 			tone: 'avoid (banned)',
+			// This one is the counter-example the preview exists to show. It must stay
+			// worded exactly as the guide forbids, so the epistemic rule is disabled for
+			// this line only — see docs/site_copy_guide.md §Audit.
+			// eslint-disable-next-line epistemic/no-epistemic-overclaim
 			copy: '🔥 Your streak is at risk! Open now to save it.',
 			banned: true,
 		},

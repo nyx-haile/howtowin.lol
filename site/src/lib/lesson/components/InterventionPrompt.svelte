@@ -21,7 +21,7 @@
 
 <section class="intervention">
 	<header>
-		<h3>One thing you'll do differently next game.</h3>
+		<h3>One thing to do differently next game.</h3>
 		<p class="sub">
 			Commit a specific, small action. Streak advances only when you commit an intent — not when
 			you open the app or read a lesson.

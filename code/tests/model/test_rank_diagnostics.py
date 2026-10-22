@@ -160,16 +160,15 @@ def test_write_rank_diagnosis_artifact_round_trip(tmp_path):
     assert data["probe_auc_by_layer"]["h_t"] == 0.54
 
 
-def test_collect_activations_records_single_game_forward_gate():
+def _synthetic_games(n_games: int = 1, n_anchors: int = 3, n_tokens: int = 4):
+    """Minimal in-memory stand-in for a MatchDataset (list is enough)."""
     from model.dataset import FRAME_FEAT_DIM, MACRO_FEAT_DIM
     from model.player_features import PLAYER_FEATURE_DIM
     from model.static_features import STATIC_VECTOR_DIM
     from model.tokens import EVENT_TYPE_TO_ID
 
-    n_anchors = 3
-    n_tokens = 4
     token_ids = list(EVENT_TYPE_TO_ID.values())
-    ds = [{
+    return [{
         "static": torch.zeros(STATIC_VECTOR_DIM, dtype=torch.float32),
         "players": torch.zeros(10, PLAYER_FEATURE_DIM, dtype=torch.float32),
         "player_ids": torch.zeros(10, dtype=torch.long),
@@ -201,35 +200,42 @@ def test_collect_activations_records_single_game_forward_gate():
         "next_event_tower_type_labels": np.zeros(n_anchors, dtype=np.int64),
         "next_event_ward_type_labels": np.zeros(n_anchors, dtype=np.int64),
         "window_positions": [np.array([i], dtype=np.int64) for i in range(n_anchors)],
-        "outcome": 1.0,
-    }]
+        "outcome": float(gi % 2),
+    } for gi in range(n_games)]
 
-    class _Model:
-        training = True
 
-        def eval(self):
-            self.training = False
-            return self
+class _StubModel:
+    """Deterministic stand-in for PlanBModel over the synthetic games above."""
 
-        def train(self, mode: bool = True):
-            self.training = mode
-            return self
+    training = True
 
-        def player_enc(self, players, player_ids):
-            return torch.zeros(players.shape[0], players.shape[1], 4)
+    def eval(self):
+        self.training = False
+        return self
 
-        def __call__(self, batch):
-            bsz, n = batch["anchor_mask"].shape
-            return {
-                "anchor_mask": batch["anchor_mask"],
-                "h": torch.zeros(bsz, n, 4),
-                "post_mu": torch.zeros(bsz, n, 3),
-                "post_logvar": torch.zeros(bsz, n, 3),
-                "prior_mu": torch.ones(bsz, n, 3) * 0.1,
-                "prior_logvar": torch.zeros(bsz, n, 3),
-            }
+    def train(self, mode: bool = True):
+        self.training = mode
+        return self
 
-    model = _Model()
+    def player_enc(self, players, player_ids):
+        return torch.zeros(players.shape[0], players.shape[1], 4)
+
+    def __call__(self, batch):
+        bsz, n = batch["anchor_mask"].shape
+        return {
+            "anchor_mask": batch["anchor_mask"],
+            "h": torch.zeros(bsz, n, 4),
+            "post_mu": torch.zeros(bsz, n, 3),
+            "post_logvar": torch.zeros(bsz, n, 3),
+            "prior_mu": torch.ones(bsz, n, 3) * 0.1,
+            "prior_logvar": torch.zeros(bsz, n, 3),
+            "outcome_logits": torch.zeros(bsz, n),
+        }
+
+
+def test_collect_activations_records_single_game_forward_gate():
+    ds = _synthetic_games(1)
+    model = _StubModel()
     counters = {}
 
     collect_activations_and_collapse(
@@ -248,3 +254,43 @@ def test_collect_activations_records_single_game_forward_gate():
     assert counters["model_forward_calls"] == 1
     assert counters["max_model_forward_batch_size"] == 1
     assert counters["stochastic_planb_forward_batching"] == "disabled_batch_size_1"
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz) — both diagnosis passes used to run silent.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_activations_and_collapse_emits_progress(capsys):
+    ds = _synthetic_games(3)
+    collect_activations_and_collapse(
+        _StubModel(),
+        ds,
+        config=DiagnoseConfig(
+            device="cpu", max_anchors_per_layer=8,
+            sample_games=3, swap_sample=3,
+        ),
+    )
+
+    out = capsys.readouterr().out
+    assert "[rank-diagnose] collect: 1/3 games" in out, out
+    assert "[rank-diagnose] collect: 3/3 games" in out, out
+    assert "anchors=" in out
+
+
+def test_run_swap_and_ablation_emits_progress(capsys):
+    from model.rank_diagnostics import run_swap_and_ablation
+
+    ds = _synthetic_games(3)
+    run_swap_and_ablation(
+        _StubModel(),
+        ds,
+        config=DiagnoseConfig(
+            device="cpu", max_anchors_per_layer=8,
+            sample_games=3, swap_sample=3,
+        ),
+    )
+
+    out = capsys.readouterr().out
+    assert "[rank-diagnose] swap+ablation: 1/3 games" in out, out
+    assert "[rank-diagnose] swap+ablation: 3/3 games" in out, out

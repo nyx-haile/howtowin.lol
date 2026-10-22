@@ -2,27 +2,71 @@ import sqlite3
 import json
 import os
 import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'howtowin.db')
+from runtime_paths import resolve_runtime_paths
+
+DEFAULT_DB_PATH = str(resolve_runtime_paths().db_path)
 
 
 def _resolve_db_path(db_path=None):
     if db_path:
         return db_path
-    return os.environ.get('HOWL_DB_PATH', DEFAULT_DB_PATH)
+    return str(resolve_runtime_paths().db_path)
 
 
-def get_conn(db_path=None):
-    conn = sqlite3.connect(_resolve_db_path(db_path), timeout=30.0)
+def _is_sqlite_uri(db_path):
+    return isinstance(db_path, str) and db_path.startswith("file:")
+
+
+def _uri_requests_readonly(db_path):
+    if not _is_sqlite_uri(db_path):
+        return False
+    query = parse_qs(urlsplit(db_path).query)
+    modes = [value.lower() for value in query.get("mode", [])]
+    immutable = [value.lower() for value in query.get("immutable", [])]
+    return "ro" in modes or any(value in {"1", "true", "yes", "on"} for value in immutable)
+
+
+def _readonly_uri(db_path):
+    if not _is_sqlite_uri(db_path):
+        return f"{Path(db_path).expanduser().resolve().as_uri()}?mode=ro"
+    parts = urlsplit(db_path)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if "mode" not in query:
+        query["mode"] = ["ro"]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+
+
+def _connect_args(db_path, readonly):
+    resolved = str(db_path)
+    use_readonly = bool(readonly) or _uri_requests_readonly(resolved)
+    if use_readonly:
+        return _readonly_uri(resolved), True, True
+    return resolved, _is_sqlite_uri(resolved), False
+
+
+def _apply_read_pragmas(conn):
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA mmap_size=8589934592")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
+def get_conn(db_path=None, readonly=None):
+    target, uri, use_readonly = _connect_args(_resolve_db_path(db_path), readonly)
+    conn = sqlite3.connect(target, timeout=30.0, uri=uri)
     conn.row_factory = sqlite3.Row
+    if use_readonly:
+        conn.execute("PRAGMA query_only=ON")
+        _apply_read_pragmas(conn)
+        return conn
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")      # WAL-safe, skip redundant fsyncs
-    conn.execute("PRAGMA busy_timeout=30000")      # 30s wait instead of locking error
-    conn.execute("PRAGMA cache_size=-65536")       # 64MB page cache per connection
-    conn.execute("PRAGMA temp_store=MEMORY")       # keep temp b-trees in RAM
-    conn.execute("PRAGMA mmap_size=8589934592")    # 8GB memory-map window
+    _apply_read_pragmas(conn)
     conn.execute("PRAGMA wal_autocheckpoint=4000") # 4000 pages (~16MB) between checkpoints
-    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 

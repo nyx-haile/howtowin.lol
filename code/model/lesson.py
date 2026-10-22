@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader
 
+from runtime_paths import resolve_runtime_paths
 from model.dataset import (
     MatchDataset, build_puuid_index, collate_games, load_split,
 )
@@ -31,9 +32,7 @@ from model.retrieval import (
 from model.m4_eval import binary_entropy
 
 
-CHECKPOINT_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "data", "model_checkpoints",
-)
+CHECKPOINT_DIR = str(resolve_runtime_paths().checkpoint_dir)
 DEFAULT_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "plan_b_full_best.pt")
 
 COHORT_PREVIEW = 8  # how many cohort match_ids to include in the output

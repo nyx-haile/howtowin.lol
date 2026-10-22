@@ -152,10 +152,13 @@ def build_frame_features_index(
                 blue_win_list.extend([outcome] * T)
                 mid_list.extend([mid] * T)
             except Exception as e:
-                print(f"[frame_features] skipping {mid}: {e}")
+                print(f"[frame_features] skipping {mid}: {e}", flush=True)
                 continue
-            if (i + 1) % log_every == 0:
-                print(f"[frame_features] {i + 1}/{len(eligible)} games encoded")
+            if (i + 1) % log_every == 0 or (i + 1) == len(eligible):
+                print(
+                    f"[frame_features] {i + 1}/{len(eligible)} games encoded",
+                    flush=True,
+                )
 
     corpus_raw = torch.from_numpy(np.concatenate(rows, axis=0)) if rows \
                  else torch.zeros(0, FRAME_BASELINE_DIM)
@@ -195,14 +198,21 @@ def encode_frame_features_queries(
     """Return frame-feature query tensors for many matches in input order."""
     grouped = read_game_frames_many(match_ids, chunk_size=db_chunk_size)
     out: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for mid in match_ids:
+    total = len(match_ids)
+    log_every = max(1, min(100, total // 20)) if total else 1
+    for i, mid in enumerate(match_ids, start=1):
         frame_rows, _ = grouped[mid]
         if not frame_rows:
             out[mid] = (
                 torch.zeros(0, FRAME_BASELINE_DIM),
                 torch.zeros(0, dtype=torch.int64),
             )
-            continue
-        vecs, minutes = _build_per_anchor_vectors(frame_rows)
-        out[mid] = (torch.from_numpy(vecs), torch.from_numpy(minutes))
+        else:
+            vecs, minutes = _build_per_anchor_vectors(frame_rows)
+            out[mid] = (torch.from_numpy(vecs), torch.from_numpy(minutes))
+        if i % log_every == 0 or i == total:
+            print(
+                f"[frame_features] queries: encoded {i}/{total} games",
+                flush=True,
+            )
     return out

@@ -148,13 +148,24 @@ docs/
 
 Heavy artifacts (corpus DBs, checkpoints, retrieval index) are **not** in git. Weights live on Hugging Face (`hf` CLI, see `~/.claude/rules/huggingface.md`).
 
+## Training Workflows
+
+Use one of two GPU workflows, depending on what you are trying to do:
+
+- **WSL GPU host, ongoing development:** use `scripts/sync-gpu.sh` to rsync local corpus DBs and splits to the WSL GPU host, run training there, then pull checkpoints back. This is still the day-to-day path for mutable local experiments and remote host iteration.
+- **Kaggle free GPU snapshot:** use a private, version-pinned Kaggle Dataset plus a Kaggle Notebook when you need a free GPU run against the current corpus snapshot. This workflow treats `/kaggle/input` as read-only and writes outputs under `/kaggle/working/howtowin`.
+
+Kaggle is for the current SQLite training snapshot. It is not the future live mutable corpus, streaming ingest path, or 100x data lake design. Do not rely on Kaggle Dataset `latest`: pin the Dataset version in the notebook so the DB snapshot, split files, and checksums stay reproducible.
+
+Start with the full runbook at `docs/kaggle_training_workflow.md`. It covers private dataset packaging, manual upload/version commands, notebook setup, read-only DB URIs, smoke checks, and cleanup rules for `/kaggle/working`.
+
 ## Toolchain
 
 - **Python:** `uv` + `pyproject.toml`. No `pip`. Run training with `uv run python -m model.cli ...`.
 - **JS/TS:** `bun` for any future site/web work.
 - **Web frontend (when one exists):** prefer Rust + WebAssembly (Leptos / Dioxus / Yew). See `~/.claude/rules/web-wasm.md`.
 - **Task tracking:** `bd` (beads) — never TodoWrite or markdown TODO files.
-- **GPU:** training runs on a remote WSL GPU host (1650 SUPER class). Hard runtime gate ≤ 24h on the 51k-game corpus, soft target ≤ 20h. Local 12.8k-game corpus is for development only; sizes there are not authoritative for production runtime planning.
+- **GPU:** training can run on the remote WSL GPU host through `scripts/sync-gpu.sh` or on Kaggle free GPUs through the private Dataset workflow in `docs/kaggle_training_workflow.md`. The WSL host remains the mutable rsync workflow; Kaggle is a snapshot workflow with read-only inputs and `/kaggle/working` output cleanup constraints.
 
 ## Common commands
 

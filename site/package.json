@@ -10,6 +10,7 @@
     "check": "NODE_OPTIONS='--require ./scripts/node-file-polyfill.cjs' svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && bun run check:schema",
     "check:watch": "NODE_OPTIONS='--require ./scripts/node-file-polyfill.cjs' svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "check:schema": "bun run scripts/check-lesson-schema.ts",
+    "check:epistemic-rule": "eslint src/lib/lesson src/routes/review",
     "lint": "prettier --check . && eslint .",
     "format": "prettier --write ."
   },

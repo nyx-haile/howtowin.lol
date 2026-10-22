@@ -21,12 +21,16 @@ from torch.utils.data import DataLoader
 
 from model.dataset import MatchDataset, collate_games
 from model.retrieval import (
-    encode_game_keys, encode_game_rank_band, query_index,
-    query_index_skill_aware, MID_GAME_MINUTES, SKILL_MIN_EFFECTIVE_K,
-    SKILL_OUT_OF_BAND_PENALTY,
+    encode_game_keys_batched, query_index, query_index_skill_aware,
+    MID_GAME_MINUTES, SKILL_MIN_EFFECTIVE_K, SKILL_OUT_OF_BAND_PENALTY,
 )
 
 _LOG2 = math.log(2.0)
+
+# Games per batched query-encoder forward. Kept modest because anchor-sequence
+# padding is per batch: a few very long games would otherwise inflate T for
+# every game batched with them. Mirrored by cli's --query-encoder-batch-size.
+DEFAULT_QUERY_ENCODER_BATCH_SIZE = 32
 
 
 def binary_entropy(p: torch.Tensor) -> torch.Tensor:
@@ -88,45 +92,97 @@ def per_minute_entropy_table(
 
 
 @torch.no_grad()
-def _build_holdout_queries(model, holdout_match_ids, puuid_index,
-                           exclude_match_ids, device, mid_minutes,
-                           *, log_every: int = 200, log_label: str = "model"):
-    """Encode every mid-game anchor of every holdout game.
+def _build_holdout_queries_combined(
+    model, holdout_match_ids, puuid_index, exclude_match_ids, device, mid_minutes,
+    *, batch_size: int = DEFAULT_QUERY_ENCODER_BATCH_SIZE,
+    log_every: int = 200, log_label: str = "model",
+):
+    """Single DataLoader pass producing every holdout query AND its metadata.
 
-    Returns (queries_raw, query_minutes) of shapes (Q, KEY_DIM), (Q,).
+    This is the one encoder pass the eval needs. Previously the plain query
+    builder and the with-metadata query builder each walked the holdout with a
+    ``batch_size=1`` DataLoader, so a full retrieval-eval paid ``2 * N`` model
+    forwards for ``N`` holdout games. This does ``ceil(N / batch_size)``.
+
+    Returns ``(queries_raw, query_minutes, query_bands, query_blue_win,
+    query_match_id)`` — the last is a list of len Q. Rows are ordered by
+    (game, anchor), preserving ``holdout_match_ids`` order.
     """
+    from model.rank_band import game_band
+    from model.retrieval import KEY_DIM
+
+    empty = (
+        torch.zeros(0, KEY_DIM),
+        torch.zeros(0, dtype=torch.int64),
+        torch.zeros(0, dtype=torch.int64),
+        torch.zeros(0, dtype=torch.int8),
+        [],
+    )
     if not holdout_match_ids:
-        from model.retrieval import KEY_DIM
-        return (
-            torch.zeros(0, KEY_DIM),
-            torch.zeros(0, dtype=torch.int64),
-        )
+        return empty
 
     ds = MatchDataset(holdout_match_ids, puuid_index=puuid_index,
                       exclude_match_ids=exclude_match_ids, cache_size=1)
-    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
+    bs = max(1, int(batch_size))
+    loader = DataLoader(ds, batch_size=bs, shuffle=False, collate_fn=collate_games)
 
-    keys_list: list[torch.Tensor] = []
-    mins_list: list[torch.Tensor] = []
+    keys_list, mins_list, bands_list, bw_list, mid_list = [], [], [], [], []
     mid_minute_set = set(int(m) for m in mid_minutes)
     total = len(holdout_match_ids)
+    done = 0
 
-    for i, batch in enumerate(loader, start=1):
+    for batch in loader:
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-        keys, minutes, _ = encode_game_keys(model, batch)
-        mask = torch.tensor([int(m.item()) in mid_minute_set for m in minutes],
-                            dtype=torch.bool)
-        if mask.any():
+        per_game = encode_game_keys_batched(model, batch)
+        # game_band is already batch-native — encode_game_rank_band is just its
+        # B=1 indexer, so calling it here would re-impose the per-game loop.
+        bands = game_band(batch["players"])
+        for gi, (keys, minutes, blue_win) in enumerate(per_game):
+            mask = torch.tensor([int(m.item()) in mid_minute_set for m in minutes],
+                                dtype=torch.bool)
+            if not mask.any():
+                continue
+            n_kept = int(mask.sum().item())
             keys_list.append(keys[mask].cpu())
             mins_list.append(minutes[mask].cpu())
-        if log_every and (i % log_every == 0 or i == total):
-            print(f"[m4_eval] {log_label}: encoded {i}/{total} games", flush=True)
+            bands_list.append(torch.full((n_kept,), int(bands[gi].item()),
+                                         dtype=torch.int64))
+            bw_list.append(torch.full((n_kept,), int(blue_win.item()),
+                                      dtype=torch.int8))
+            mid_list.extend([holdout_match_ids[done + gi]] * n_kept)
+        prev, done = done, done + len(per_game)
+        # Progress is reported in games (not batches) so the cadence is stable
+        # across batch sizes; a batch can cross several log_every boundaries.
+        if log_every and (done // log_every != prev // log_every or done == total):
+            print(f"[m4_eval] {log_label}: encoded {done}/{total} games", flush=True)
 
     if not keys_list:
-        from model.retrieval import KEY_DIM
-        return (torch.zeros(0, KEY_DIM), torch.zeros(0, dtype=torch.int64))
+        return empty
 
-    return torch.cat(keys_list, dim=0), torch.cat(mins_list, dim=0)
+    return (
+        torch.cat(keys_list, dim=0),
+        torch.cat(mins_list, dim=0),
+        torch.cat(bands_list, dim=0),
+        torch.cat(bw_list, dim=0),
+        mid_list,
+    )
+
+
+@torch.no_grad()
+def _build_holdout_queries(model, holdout_match_ids, puuid_index,
+                           exclude_match_ids, device, mid_minutes,
+                           *, batch_size: int = DEFAULT_QUERY_ENCODER_BATCH_SIZE,
+                           log_every: int = 200, log_label: str = "model"):
+    """Keys-and-minutes view of :func:`_build_holdout_queries_combined`.
+
+    Returns (queries_raw, query_minutes) of shapes (Q, KEY_DIM), (Q,).
+    """
+    keys, minutes, _, _, _ = _build_holdout_queries_combined(
+        model, holdout_match_ids, puuid_index, exclude_match_ids, device,
+        mid_minutes, batch_size=batch_size, log_every=log_every,
+        log_label=log_label,
+    )
+    return keys, minutes
 
 
 def _eval_one_index(bundle, queries_raw, query_minutes, *, k_sweep,
@@ -189,6 +245,7 @@ def run_m4_eval(
     headline_minutes=tuple(range(10, 26)),
     device: str = "cpu",
     query_batch_size: int = 256,
+    query_encoder_batch_size: int = DEFAULT_QUERY_ENCODER_BATCH_SIZE,
     run_baselines: bool = True,
     static_only_bundle=None,
     frame_features_bundle=None,
@@ -209,6 +266,7 @@ def run_m4_eval(
         queries_raw, query_minutes = _build_holdout_queries(
             model, holdout_match_ids, puuid_index, exclude_match_ids,
             device, headline_minutes,
+            batch_size=query_encoder_batch_size,
             log_label=f"{holdout_label}/model",
         )
         save_cached_keys("model", holdout_label,
@@ -635,55 +693,18 @@ def run_cohort_minute_diagnostic(
 @torch.no_grad()
 def _build_holdout_queries_with_meta(
     model, holdout_match_ids, puuid_index, exclude_match_ids, device, mid_minutes,
+    *, batch_size: int = DEFAULT_QUERY_ENCODER_BATCH_SIZE,
+    log_every: int = 200, log_label: str = "skill_aware",
 ):
-    """Per-anchor queries plus per-query metadata.
+    """Full view of :func:`_build_holdout_queries_combined`.
 
     Returns ``(queries_raw, query_minutes, query_bands, query_blue_win,
     query_match_id)`` — last is a list of len Q.
     """
-    from model.retrieval import KEY_DIM
-
-    empty = (
-        torch.zeros(0, KEY_DIM),
-        torch.zeros(0, dtype=torch.int64),
-        torch.zeros(0, dtype=torch.int64),
-        torch.zeros(0, dtype=torch.int8),
-        [],
-    )
-    if not holdout_match_ids:
-        return empty
-
-    ds = MatchDataset(holdout_match_ids, puuid_index=puuid_index,
-                      exclude_match_ids=exclude_match_ids, cache_size=1)
-    loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
-
-    keys_list, mins_list, bands_list, bw_list, mid_list = [], [], [], [], []
-    mid_set = set(int(m) for m in mid_minutes)
-
-    for i, batch in enumerate(loader):
-        batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-        keys, minutes, blue_win = encode_game_keys(model, batch)
-        mask = torch.tensor([int(m.item()) in mid_set for m in minutes],
-                            dtype=torch.bool)
-        if not mask.any():
-            continue
-        q_band = encode_game_rank_band(batch)
-        n_kept = int(mask.sum().item())
-        keys_list.append(keys[mask].cpu())
-        mins_list.append(minutes[mask].cpu())
-        bands_list.append(torch.full((n_kept,), q_band, dtype=torch.int64))
-        bw_list.append(torch.full((n_kept,), int(blue_win.item()), dtype=torch.int8))
-        mid_list.extend([holdout_match_ids[i]] * n_kept)
-
-    if not keys_list:
-        return empty
-
-    return (
-        torch.cat(keys_list, dim=0),
-        torch.cat(mins_list, dim=0),
-        torch.cat(bands_list, dim=0),
-        torch.cat(bw_list, dim=0),
-        mid_list,
+    return _build_holdout_queries_combined(
+        model, holdout_match_ids, puuid_index, exclude_match_ids, device,
+        mid_minutes, batch_size=batch_size, log_every=log_every,
+        log_label=log_label,
     )
 
 
@@ -711,6 +732,7 @@ def run_skill_aware_eval(
     k: int = 64,
     device: str = "cpu",
     query_batch_size: int = 256,
+    query_encoder_batch_size: int = DEFAULT_QUERY_ENCODER_BATCH_SIZE,
     skill_batch_size: int = 64,
     min_effective_k: int = SKILL_MIN_EFFECTIVE_K,
     out_of_band_penalty: float = SKILL_OUT_OF_BAND_PENALTY,
@@ -723,6 +745,7 @@ def run_skill_aware_eval(
     queries_raw, q_min, q_band, q_bw, q_mid = _build_holdout_queries_with_meta(
         model, holdout_match_ids, puuid_index, exclude_match_ids,
         device, MID_GAME_MINUTES,
+        batch_size=query_encoder_batch_size,
     )
 
     Q = int(queries_raw.shape[0])

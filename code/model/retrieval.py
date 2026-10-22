@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import torch
 from torch.utils.data import DataLoader
 
+from runtime_paths import resolve_runtime_paths
 from model.dataset import MatchDataset, collate_games
 from model.rank_band import N_BANDS, game_band
 
@@ -25,9 +26,7 @@ D_H = 512
 D_Z = 32
 KEY_DIM = D_H + D_Z  # 544
 
-INDEX_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "data", "retrieval"
-)
+INDEX_DIR = str(resolve_runtime_paths().retrieval_dir)
 DEFAULT_INDEX_PATH = os.path.join(INDEX_DIR, "plan_b_index.pt")
 
 MID_GAME_MINUTES = tuple(range(10, 26))  # 10..25 inclusive
@@ -108,31 +107,78 @@ class Whitener:
 
 
 @torch.no_grad()
-def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run model.forward on a single-game batch (B=1) and return:
+def encode_game_keys_batched(
+    model, batch,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Run model.forward ONCE on a B-game batch and split the result per game.
 
-    keys:       (T, KEY_DIM) — concat of [h_t, post_mu_t] per anchor.
-    minutes:    (T,) int64 — anchor minute = round(token_timestamp / 60000).
+    Returns a list of length B, in DataLoader/sample order. Entry ``bi`` is a
+    ``(keys, minutes, blue_win)`` triple:
+
+    keys:       (T_bi, KEY_DIM) — concat of [h_t, post_mu_t] over that game's
+                *valid* anchors only. Collate pads every game up to the batch's
+                longest anchor sequence; the padded tail is dropped here.
+    minutes:    (T_bi,) int64 on CPU — round(token_timestamp / 60000).
     blue_win:   () int8 — game-level outcome (1 if blue won, else 0).
+
+    Games with no valid anchors yield empty ``keys``/``minutes`` rather than
+    being skipped, so the result stays index-aligned with the batch rows.
+
+    NOTE: the keys are NOT reproducible across calls — PlanB's eval forward
+    samples ``z_post`` (see ``rssm.reparameterize``), so B=1 and B>1 encodings
+    of the same game agree only under a deterministic-``reparameterize``
+    contract. See ``tests/model/test_m4_eval.py`` ::
+    ``test_encode_game_keys_eval_is_stochastic_without_rng_replay``.
     """
-    assert batch["tokens"].size(0) == 1, "encode_game_keys expects B=1"
     was_training = model.training
     model.eval()
     out = model(batch)
     model.train(was_training)
 
-    T = out["n_anchors"]
-    h = out["h"][0]                # (T, D_H)
-    post_mu = out["post_mu"][0]    # (T, D_Z)
-    keys = torch.cat([h, post_mu], dim=-1)  # (T, KEY_DIM)
+    h = out["h"]                                 # (B, T, D_H)
+    post_mu = out["post_mu"]                     # (B, T, D_Z)
+    keys_all = torch.cat([h, post_mu], dim=-1)   # (B, T, KEY_DIM)
+    outcome = batch["outcome"].to(dtype=torch.int8)
 
-    anchor_pos = batch["anchor_positions"][0]   # (T,)
-    ts = batch["token_timestamps"][0]           # (L,)
-    anchor_ts = ts.gather(0, anchor_pos.long()) # (T,) ms
-    minutes = (anchor_ts / 60000.0).round().to(torch.int64)
+    per_game: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    # The anchor_mask slicing below (loop header through `minutes = ...`) is
+    # copied verbatim from model/baselines/static_only_index.py:162-169
+    # (encode_static_only_query_keys) so both encoders drop padded anchors and
+    # derive anchor minutes identically. Only the empty-game branch differs:
+    # static-only `continue`s, we emit an empty entry to keep row alignment.
+    for bi in range(batch["static"].size(0)):
+        anchor_mask = batch["anchor_mask"][bi]
+        if not anchor_mask.any():
+            per_game.append((
+                keys_all.new_zeros(0, KEY_DIM),
+                torch.zeros(0, dtype=torch.int64),
+                outcome[bi],
+            ))
+            continue
+        anchor_pos = batch["anchor_positions"][bi, anchor_mask].long()
+        ts = batch["token_timestamps"][bi]
+        anchor_ts = ts.gather(0, anchor_pos)
+        minutes = (anchor_ts / 60000.0).round().to(torch.int64).cpu()
+        per_game.append((keys_all[bi][anchor_mask], minutes, outcome[bi]))
+    return per_game
 
-    blue_win = batch["outcome"][0].to(dtype=torch.int8)
-    return keys, minutes, blue_win
+
+@torch.no_grad()
+def encode_game_keys(model, batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """B=1 wrapper over :func:`encode_game_keys_batched`. Returns:
+
+    keys:       (T, KEY_DIM) — concat of [h_t, post_mu_t] per anchor.
+    minutes:    (T,) int64 — anchor minute = round(token_timestamp / 60000).
+    blue_win:   () int8 — game-level outcome (1 if blue won, else 0).
+
+    A B=1 collate never pads (max_T is the single game's own anchor count), so
+    the anchor_mask filter in the batched encoder is a no-op here and the keys
+    are identical to the pre-batching implementation. The one deliberate
+    contract change: ``minutes`` now always comes back on CPU, matching the
+    static-only baseline encoder. Every in-tree caller already moved it to CPU.
+    """
+    assert batch["tokens"].size(0) == 1, "encode_game_keys expects B=1"
+    return encode_game_keys_batched(model, batch)[0]
 
 
 @torch.no_grad()
@@ -365,7 +411,12 @@ def query_index(
     out_idx = torch.empty(Q, k, dtype=torch.long)
     out_d = torch.empty(Q, k, dtype=torch.float32)
 
-    for start in range(0, Q, batch_size):
+    # Progress cadence auto-tuned to the workload; a single-batch query (the
+    # interactive lesson path) stays silent, multi-batch eval sweeps report.
+    total_batches = (Q + batch_size - 1) // batch_size
+    log_every = max(1, min(50, total_batches // 20)) if total_batches > 1 else 0
+
+    for bi, start in enumerate(range(0, Q, batch_size), start=1):
         end = min(start + batch_size, Q)
         qb = queries_raw[start:end].to(device=device, dtype=corpus.dtype)
         qb_white = bundle.whitener.apply(qb)
@@ -394,6 +445,13 @@ def query_index(
         else:
             out_idx[start:end] = idx_top.cpu()
             out_d[start:end] = d_top.cpu()
+
+        if log_every and (bi % log_every == 0 or bi == total_batches):
+            print(
+                f"[retrieval] query_index: batch {bi}/{total_batches}"
+                f"  queries={end}/{Q}  k={k}",
+                flush=True,
+            )
 
     return out_idx, out_d
 
@@ -506,7 +564,12 @@ def query_index_skill_aware(
     penalty_t = torch.tensor(out_of_band_penalty, device=device, dtype=torch.float32)
     INF = float("inf")
 
-    for start in range(0, Q, batch_size):
+    # Progress cadence auto-tuned to the workload; a single-batch query (the
+    # interactive lesson path) stays silent, multi-batch eval sweeps report.
+    total_batches = (Q + batch_size - 1) // batch_size
+    log_every = max(1, min(50, total_batches // 20)) if total_batches > 1 else 0
+
+    for bi, start in enumerate(range(0, Q, batch_size), start=1):
         end = min(start + batch_size, Q)
         b = end - start
 
@@ -643,6 +706,13 @@ def query_index_skill_aware(
         eff_k[start:end] = eff_k_b.cpu()
         stage[start:end] = stage_b.cpu()
         in_band[start:end] = in_band_b.cpu()
+
+        if log_every and (bi % log_every == 0 or bi == total_batches):
+            print(
+                f"[retrieval] query_index_skill_aware: batch {bi}/{total_batches}"
+                f"  queries={end}/{Q}  k={k}",
+                flush=True,
+            )
 
     info = {
         "effective_k_per_query": eff_k,

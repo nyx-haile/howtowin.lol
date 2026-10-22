@@ -98,3 +98,27 @@ def test_read_game_frames_many_preserves_ordering(all_match_ids):
         rows, _ = grouped[mid]
         row_order = [(r["timestamp_ms"], r["participant_slot"]) for r in rows]
         assert row_order == sorted(row_order)
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz)
+# ---------------------------------------------------------------------------
+
+
+def test_encode_frame_features_queries_emits_progress(capsys, fixture_match_id):
+    from model.baselines.frame_features_index import encode_frame_features_queries
+    encode_frame_features_queries([fixture_match_id])
+    out = capsys.readouterr().out
+    assert "[frame_features] queries: encoded 1/1 games" in out, out
+
+
+def test_build_frame_features_index_emits_final_progress_line(
+    capsys, fixture_match_id,
+):
+    from model.baselines.frame_features_index import build_frame_features_index
+    build_frame_features_index(
+        train_match_ids=[fixture_match_id],
+        exclude_match_ids=set(),
+    )
+    out = capsys.readouterr().out
+    assert "[frame_features] 1/1 games encoded" in out, out

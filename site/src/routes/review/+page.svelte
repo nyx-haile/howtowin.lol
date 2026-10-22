@@ -20,7 +20,7 @@
 	<WaitlistForm source="review" maxWidth="520px" marginBottom="32px" />
 
 	<section class="preview">
-		<h3>What you'll get</h3>
+		<h3>What you get</h3>
 		<ul>
 			<li>A short lesson per game, tied to the moments that decided it.</li>
 			<li>Concepts mined from Challenger and pro play, not generic tips.</li>

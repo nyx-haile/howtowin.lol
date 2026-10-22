@@ -349,3 +349,28 @@ def test_dr_and_dml_share_fold_structure_under_default_random_state():
     dr_other = _dr_estimator(X, T, Y, random_state=99)
     dml_other = _dml_estimator(X, T, Y, random_state=99)
     assert dr_a != dr_other or dml_a != dml_other
+
+
+# --- 19. Progress logging (bead 1mz) ----------------------------------------
+
+def test_extract_rows_emits_progress(capsys, fixture_match_id):
+    """extract_rows used to encode the whole holdout with no stdout output."""
+    from model.causal_eval import extract_rows
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    extract_rows(
+        model=model,
+        holdout_match_ids=[fixture_match_id],
+        puuid_index=idx,
+        exclude_match_ids=set(),
+        device="cpu",
+    )
+
+    out = capsys.readouterr().out
+    assert "[causal-eval] extract_rows: encoded 1/1 games" in out, out
+    assert "rows=" in out

@@ -388,3 +388,242 @@ def test_encode_game_keys_eval_is_stochastic_without_rng_replay():
         "PlanB eval keys sample z_post; do not claim B=1/B>1 batching "
         "parity without a deterministic eval or RNG-replay contract."
     )
+
+
+# ---------------------------------------------------------------------------
+# Progress logging (bead 1mz) — the skill-aware query builder used to encode
+# the whole holdout silently.
+# ---------------------------------------------------------------------------
+
+
+def test_build_holdout_queries_with_meta_emits_progress(capsys, fixture_match_id):
+    from model.m4_eval import _build_holdout_queries_with_meta, MID_GAME_MINUTES
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    _build_holdout_queries_with_meta(
+        model, [fixture_match_id], idx, set(), "cpu", MID_GAME_MINUTES,
+        log_every=1,
+    )
+
+    out = capsys.readouterr().out
+    assert "[m4_eval] skill_aware: encoded 1/1 games" in out, out
+
+
+def test_build_holdout_queries_with_meta_progress_can_be_disabled(
+    capsys, fixture_match_id,
+):
+    from model.m4_eval import _build_holdout_queries_with_meta, MID_GAME_MINUTES
+    from model.plan_b_model import PlanBModel
+    from model.dataset import build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    model = PlanBModel(max_puuids=len(idx) + 1)
+    model.eval()
+
+    _build_holdout_queries_with_meta(
+        model, [fixture_match_id], idx, set(), "cpu", MID_GAME_MINUTES,
+        log_every=0,
+    )
+
+    assert "skill_aware:" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# M4 eval Stage 2 (htw-cfu) — single-pass DataLoader over the holdout.
+#
+# PROOF BOUNDARY: these tests assert model-forward CALL COUNTS and output
+# equivalence. They do NOT measure wall-clock, and no speed-up is claimed here.
+# This checkout has no GPU, no plan_b_full_best.pt and 749 local games against
+# 51k remote, so a runtime figure measured here would be meaningless.
+# ---------------------------------------------------------------------------
+
+
+class _CountingStubModel:
+    """Stand-in for PlanBModel that records how often forward is called.
+
+    Returns correctly-shaped zero h/post_mu — the keys are irrelevant here, the
+    call count is the thing under test.
+    """
+
+    def __init__(self):
+        self.forward_calls = 0
+        self.batch_sizes: list[int] = []
+        self.training = False
+
+    def eval(self):
+        return self
+
+    def train(self, mode=True):
+        self.training = bool(mode)
+        return self
+
+    def __call__(self, batch):
+        from model.retrieval import D_H, D_Z
+
+        B, T = batch["anchor_mask"].shape
+        self.forward_calls += 1
+        self.batch_sizes.append(B)
+        return {"h": torch.zeros(B, T, D_H),
+                "post_mu": torch.zeros(B, T, D_Z),
+                "n_anchors": T}
+
+
+class _RepeatDataset:
+    """Serves ``n`` copies of one real MatchDataset sample."""
+
+    def __init__(self, sample, n):
+        self.sample = sample
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, i):
+        if i >= self.n:
+            raise IndexError(i)
+        return self.sample
+
+
+def _patch_repeat_dataset(monkeypatch, fixture_match_id):
+    import model.m4_eval as m4
+    from model.dataset import MatchDataset, build_puuid_index
+
+    idx = build_puuid_index([fixture_match_id])
+    sample = MatchDataset([fixture_match_id], puuid_index=idx)[0]
+    monkeypatch.setattr(
+        m4, "MatchDataset",
+        lambda match_ids, **kwargs: _RepeatDataset(sample, len(match_ids)),
+    )
+    return sample
+
+
+def test_build_holdout_queries_combined_cuts_forward_calls_from_2n_to_ceil_n_over_b(
+    monkeypatch, fixture_match_id,
+):
+    """The Stage-2 claim, as a count: 2N model forwards become ceil(N / B).
+
+    2N is the pre-batching cost — ``_build_holdout_queries`` and
+    ``_build_holdout_queries_with_meta`` each walked the whole holdout with a
+    batch_size=1 DataLoader. Both halves of that ratio are measured here rather
+    than asserted from memory: the 2N leg is reproduced by driving the two
+    wrappers at batch_size=1.
+    """
+    import model.m4_eval as m4
+
+    _patch_repeat_dataset(monkeypatch, fixture_match_id)
+    N, B = 7, 3
+    ids = [f"MATCH-{i}" for i in range(N)]
+
+    # Old cost: two separate B=1 passes over the holdout.
+    naive = _CountingStubModel()
+    m4._build_holdout_queries(
+        naive, ids, {}, set(), "cpu", m4.MID_GAME_MINUTES,
+        batch_size=1, log_every=0,
+    )
+    m4._build_holdout_queries_with_meta(
+        naive, ids, {}, set(), "cpu", m4.MID_GAME_MINUTES,
+        batch_size=1, log_every=0,
+    )
+    assert naive.forward_calls == 2 * N == 14
+    assert naive.batch_sizes == [1] * (2 * N)
+
+    # New cost: one batched pass yielding queries AND metadata together.
+    batched = _CountingStubModel()
+    keys, minutes, bands, blue_win, mids = m4._build_holdout_queries_combined(
+        batched, ids, {}, set(), "cpu", m4.MID_GAME_MINUTES,
+        batch_size=B, log_every=0,
+    )
+
+    assert batched.forward_calls == math.ceil(N / B) == 3
+    assert batched.batch_sizes == [3, 3, 1]
+    # Non-vacuous: the pass actually produced queries.
+    Q = keys.shape[0]
+    assert Q > 0
+    assert minutes.shape[0] == bands.shape[0] == blue_win.shape[0] == Q
+    assert len(mids) == Q
+    assert set(mids) == set(ids), "every holdout game contributed queries"
+
+
+def test_build_holdout_queries_wrappers_are_views_of_combined(
+    monkeypatch, fixture_match_id,
+):
+    """Both legacy builders return exactly slices of the combined result.
+
+    Guards the demotion: neither wrapper may drift from the single pass.
+    """
+    import model.m4_eval as m4
+
+    _patch_repeat_dataset(monkeypatch, fixture_match_id)
+    ids = [f"MATCH-{i}" for i in range(5)]
+    args = (ids, {}, set(), "cpu", m4.MID_GAME_MINUTES)
+
+    combined = m4._build_holdout_queries_combined(
+        _CountingStubModel(), *args, batch_size=2, log_every=0,
+    )
+    plain = m4._build_holdout_queries(
+        _CountingStubModel(), *args, batch_size=2, log_every=0,
+    )
+    meta = m4._build_holdout_queries_with_meta(
+        _CountingStubModel(), *args, batch_size=2, log_every=0,
+    )
+
+    assert len(plain) == 2 and len(meta) == 5
+    assert torch.equal(plain[0], combined[0])
+    assert torch.equal(plain[1], combined[1])
+    for got, want in zip(meta[:4], combined[:4]):
+        assert torch.equal(got, want)
+    assert meta[4] == combined[4]
+
+
+def test_build_holdout_queries_combined_batch_size_does_not_change_output(
+    monkeypatch, fixture_match_id,
+):
+    """Q, minutes, bands, outcomes and match-id mapping are batch-size invariant.
+
+    Keys are deliberately excluded: the stub model emits zeros, and with a real
+    model they are stochastic (see test_encode_game_keys_eval_is_stochastic_
+    without_rng_replay). The B=1/B>1 key comparison lives in test_retrieval.py
+    under a monkeypatched-deterministic reparameterize.
+    """
+    import model.m4_eval as m4
+
+    _patch_repeat_dataset(monkeypatch, fixture_match_id)
+    ids = [f"MATCH-{i}" for i in range(6)]
+    args = (ids, {}, set(), "cpu", m4.MID_GAME_MINUTES)
+
+    ref = m4._build_holdout_queries_combined(
+        _CountingStubModel(), *args, batch_size=1, log_every=0,
+    )
+    for bs in (2, 4, 6, 32):
+        got = m4._build_holdout_queries_combined(
+            _CountingStubModel(), *args, batch_size=bs, log_every=0,
+        )
+        assert got[0].shape == ref[0].shape, f"Q changed at batch_size={bs}"
+        assert torch.equal(got[1], ref[1]), f"minutes changed at batch_size={bs}"
+        assert torch.equal(got[2], ref[2]), f"bands changed at batch_size={bs}"
+        assert torch.equal(got[3], ref[3]), f"outcomes changed at batch_size={bs}"
+        assert got[4] == ref[4], f"match-id mapping changed at batch_size={bs}"
+
+
+def test_build_holdout_queries_combined_progress_counts_games_not_batches(
+    monkeypatch, capsys, fixture_match_id,
+):
+    """Progress cadence stays in games even though the loader now yields batches."""
+    import model.m4_eval as m4
+
+    _patch_repeat_dataset(monkeypatch, fixture_match_id)
+    ids = [f"MATCH-{i}" for i in range(6)]
+
+    m4._build_holdout_queries_combined(
+        _CountingStubModel(), ids, {}, set(), "cpu", m4.MID_GAME_MINUTES,
+        batch_size=4, log_every=2, log_label="combined",
+    )
+
+    out = capsys.readouterr().out
+    assert "[m4_eval] combined: encoded 4/6 games" in out, out
+    assert "[m4_eval] combined: encoded 6/6 games" in out, out

@@ -377,6 +377,8 @@ def extract_rows(
     loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_games)
 
     rows: list[dict] = []
+    total_games = len(ids)
+    log_every = max(1, min(50, total_games // 20)) if total_games else 1
     for gi, batch in enumerate(loader):
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         out = model(batch)
@@ -441,6 +443,14 @@ def extract_rows(
                 "x": x_red, "treatments": treatments_red,
                 "outcome": 1.0 - outcome, "rank_band": rank_band,
             })
+
+        done = gi + 1
+        if done % log_every == 0 or done == total_games:
+            print(
+                f"[causal-eval] extract_rows: encoded {done}/{total_games} games"
+                f"  rows={len(rows)}",
+                flush=True,
+            )
     return rows
 
 
