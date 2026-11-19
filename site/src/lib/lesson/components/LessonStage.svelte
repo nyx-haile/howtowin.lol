@@ -15,7 +15,11 @@
 
 	let session: LessonSessionStore;
 	$: {
-		session = createLessonSession(fixtureId);
+		// No authored pretest (every live lesson today): go straight to the
+		// reveal rather than show an empty quiz.
+		session = createLessonSession(fixtureId, {
+			startAt: viewModel.pretestChoices.length > 0 ? 'pretest' : 'reveal',
+		});
 		if (!viewModel.hasAnchor) {
 			session.markNoAnchor();
 		}

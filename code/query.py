@@ -2,7 +2,17 @@
 """JSON bridge for SvelteKit. Reads JSON from stdin, writes JSON to stdout."""
 import sys
 import json
-from db import get_conn
+import os
+
+LESSON_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "data", "lesson_cache",
+)
+
+
+def get_conn(db_path=None):
+    # Imported lazily so the lesson action doesn't need the legacy DB module.
+    from db import get_conn as _get_conn
+    return _get_conn(db_path)
 
 
 def search_players(query, db_path=None):
@@ -134,6 +144,67 @@ def get_game_review(match_id, puuid, db_path=None):
     }
 
 
+def _file_fingerprint(path):
+    """Cheap identity for a checkpoint/index file: path + size + mtime.
+
+    Computed without loading the file, so a cache hit never pays the
+    multi-GB index load. Any retrain or index rebuild changes it.
+    """
+    st = os.stat(path)
+    return f"{os.path.abspath(path)}:{st.st_size}:{int(st.st_mtime)}"
+
+
+def get_lesson(match_id, team="blue", k=64, force=False, skill_aware=False):
+    """Run model.lesson.generate_lesson, cached per (match_id, team, k).
+
+    Cache lives at data/lesson_cache/<match_id>_<team>_k<k>.json and is
+    invalidated when the checkpoint or retrieval index file changes.
+    """
+    if team not in ("blue", "red"):
+        return {"error": f"team must be 'blue' or 'red', got {team!r}"}
+    if not match_id or "/" in match_id or ".." in match_id:
+        return {"error": f"invalid match_id {match_id!r}"}
+
+    from model.lesson import DEFAULT_CHECKPOINT_PATH
+    from model.retrieval import DEFAULT_INDEX_PATH
+
+    missing = [p for p in (DEFAULT_CHECKPOINT_PATH, DEFAULT_INDEX_PATH)
+               if not os.path.exists(p)]
+    if missing:
+        return {
+            "error": "model_unavailable",
+            "detail": "missing " + ", ".join(os.path.normpath(p) for p in missing),
+        }
+
+    fingerprint = {
+        "checkpoint": _file_fingerprint(DEFAULT_CHECKPOINT_PATH),
+        "index": _file_fingerprint(DEFAULT_INDEX_PATH),
+        "skill_aware": bool(skill_aware),
+    }
+    os.makedirs(LESSON_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(LESSON_CACHE_DIR, f"{match_id}_{team}_k{int(k)}.json")
+
+    if not force and os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                cached = json.load(f)
+            if cached.get("fingerprint") == fingerprint:
+                return cached["lesson"]
+        except (OSError, ValueError, KeyError):
+            pass  # corrupt or stale cache entry: regenerate
+
+    from model.lesson import generate_lesson, lesson_to_dict
+    lesson = lesson_to_dict(generate_lesson(
+        match_id, team=team, k=int(k), skill_aware=bool(skill_aware),
+    ))
+
+    tmp = cache_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"fingerprint": fingerprint, "lesson": lesson}, f)
+    os.replace(tmp, cache_path)
+    return lesson
+
+
 def main():
     raw = sys.stdin.read()
     req = json.loads(raw)
@@ -145,6 +216,20 @@ def main():
         result = get_player_review(req['puuid'])
     elif action == 'game':
         result = get_game_review(req['match_id'], req['puuid'])
+    elif action == 'lesson':
+        # generate_lesson prints progress to stdout; keep stdout pure JSON.
+        real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            result = get_lesson(
+                req['match_id'], team=req.get('team', 'blue'),
+                k=req.get('k', 64), force=req.get('force', False),
+                skill_aware=req.get('skill_aware', False),
+            )
+        except Exception as e:  # surface as JSON so the site can render it
+            result = {'error': 'lesson_failed', 'detail': f'{type(e).__name__}: {e}'}
+        finally:
+            sys.stdout = real_stdout
     else:
         result = {'error': f'Unknown action: {action}'}
 

@@ -38,3 +38,4 @@ logs/
 .claude/
 .playwright-mcp/
 .thesis/worktrees/
+data/lesson_cache/
