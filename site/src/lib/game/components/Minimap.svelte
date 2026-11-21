@@ -28,6 +28,10 @@
 	export let marks: GameEvent[] = [];
 	/** Fog of war from `team`'s view; omit to show everyone. */
 	export let visibility: Map<number, Visibility> | null = null;
+	/** When set, any click on the map reports game coordinates. */
+	export let onMapClick: ((x: number, y: number) => void) | null = null;
+	/** A player's guess marker. */
+	export let guess: { x: number; y: number } | null = null;
 	export let onPick: (id: string) => void = () => {};
 
 	const S = RIFT_SIZE;
@@ -54,12 +58,34 @@
 		}
 	});
 
+	let svgEl: SVGSVGElement;
+	function mapClick(e: MouseEvent) {
+		if (!onMapClick || !svgEl) return;
+		const pt = svgEl.createSVGPoint();
+		pt.x = e.clientX;
+		pt.y = e.clientY;
+		const m = svgEl.getScreenCTM();
+		if (!m) return;
+		const p = pt.matrixTransform(m.inverse());
+		onMapClick(Math.round(p.x), Math.round(S - p.y));
+	}
+
 	function pick(id: string) {
 		if (pickable) onPick(id);
 	}
 </script>
 
-<svg viewBox="0 0 {S} {S}" class="rift" role="img" aria-label="Minimap at {clock(state.t)}">
+<!-- Free map clicks are a pointer convenience for the "where is X?" guess. -->
+<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+<svg
+	bind:this={svgEl}
+	on:click={mapClick}
+	class:guessing={!!onMapClick}
+	viewBox="0 0 {S} {S}"
+	class="rift"
+	role="img"
+	aria-label="Minimap at {clock(state.t)}"
+>
 	<defs>
 		{#each state.champions as c (c.participant.id)}
 			<clipPath id="clip-{uid}-{c.participant.id}">
@@ -251,6 +277,14 @@
 			{/if}
 		</g>
 	{/each}
+	{#if guess}
+		<g class="guess">
+			<circle cx={guess.x} cy={fy(guess.y)} r="700" />
+			<path
+				d="M {guess.x - 350} {fy(guess.y)} L {guess.x + 350} {fy(guess.y)} M {guess.x} {fy(guess.y) - 350} L {guess.x} {fy(guess.y) + 350}"
+			/>
+		</g>
+	{/if}
 </svg>
 
 <style>
@@ -261,6 +295,18 @@
 		border-radius: 10px;
 		--team-blue: #4ea1ff;
 		--team-red: #ff5a5f;
+	}
+	.rift.guessing {
+		cursor: crosshair;
+	}
+	.guess circle {
+		fill: color-mix(in srgb, var(--gold) 20%, transparent);
+		stroke: var(--gold);
+		stroke-width: 110;
+	}
+	.guess path {
+		stroke: var(--gold);
+		stroke-width: 110;
 	}
 	.ground {
 		fill: #13211b;

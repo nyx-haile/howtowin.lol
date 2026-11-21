@@ -33,14 +33,41 @@
 	$: pausedVis = visibilityAt(replay, lesson.t, lesson.team, paused);
 	$: facts = factsAt(paused, lesson.team, lesson.targets, pausedVis);
 	let showAll = true;
+
+	// "Where is X?" step: before the decision, ask the player to place the
+	// enemy they couldn't see (jungler first, else the longest-unseen one).
+	type Track = 'ask' | 'answered' | 'done';
+	$: unseenTarget = (() => {
+		const hidden = replay.participants.filter(
+			(p) => p.team !== lesson.team && pausedVis.get(p.id)?.kind !== 'visible'
+		);
+		return hidden.find((p) => p.role === 'JUNGLE') ?? hidden[0] ?? null;
+	})();
+	let track: Track = 'ask';
+	let guess: { x: number; y: number } | null = null;
+	$: trackActive = phase === 'puzzle' && unseenTarget !== null && track !== 'done';
+	$: actual = unseenTarget
+		? (paused.champions.find((c) => c.participant.id === unseenTarget.id) ?? null)
+		: null;
+	$: missBy = guess && actual ? Math.hypot(guess.x - actual.x, guess.y - actual.y) : 0;
+	$: unseenInfo = unseenTarget ? pausedVis.get(unseenTarget.id) : undefined;
+	function placeGuess(x: number, y: number) {
+		if (track !== 'ask') return;
+		guess = { x, y };
+		track = 'answered';
+	}
 	// Fog applies while the player is "in the game" (lead-in and puzzle);
 	// after answering, the full board is revealed unless they toggle it back.
 	$: fogged = phase === 'intro' || phase === 'puzzle' || !showAll;
 	$: second = Math.floor(now);
-	$: vis =
+	$: baseVis =
 		fogged && phase !== 'intent' && phase !== 'committed'
 			? visibilityAt(replay, second, lesson.team)
 			: null;
+	$: vis =
+		baseVis && unseenTarget && phase === 'puzzle' && track !== 'ask'
+			? new Map([...baseVis, [unseenTarget.id, { kind: 'visible' as const }]])
+			: baseVis;
 	$: beats = eventsBetween(replay, lesson.t, endT);
 	$: view = stateAt(replay, now);
 	$: marks = replay.events.filter((e) => e.t > startT && e.t <= now && e.type !== 'building');
@@ -180,8 +207,10 @@
 					{replay}
 					state={view}
 					team={lesson.team}
-					targets={phase === 'intro' ? [] : lesson.targets}
-					pickable={phase === 'puzzle'}
+					targets={phase === 'intro' || trackActive ? [] : lesson.targets}
+					pickable={phase === 'puzzle' && !trackActive}
+					onMapClick={trackActive && track === 'ask' ? placeGuess : null}
+					guess={phase === 'puzzle' && track !== 'done' ? guess : null}
 					{picked}
 					actualTargetId={phase === 'reveal' ? lesson.actualTargetId : null}
 					targetNotes={notes}
@@ -240,6 +269,37 @@
 						mattered and asks what you'd do.
 					</p>
 					<button type="button" class="link" on:click={skipToPuzzle}>Skip to the puzzle →</button>
+				</section>
+			{:else if trackActive && unseenTarget}
+				<section class="question">
+					<h2>Before you decide</h2>
+					<p class="q">
+						{championName(unseenTarget.champion)}
+						{unseenInfo?.kind === 'last-seen'
+							? `was last seen ${Math.round(unseenInfo.agoS)}s ago.`
+							: "hasn't been seen for two minutes."}
+						Where are they now?
+					</p>
+					{#if track === 'ask'}
+						<p class="hint">Tap the map where you think they are.</p>
+					{:else}
+						<p class="verdict" class:close={missBy < 2000}>
+							{missBy < 2000
+								? 'Close.'
+								: missBy < 4500
+									? 'Right side of the map, wrong spot.'
+									: 'Not there.'}
+							{championName(unseenTarget.champion)} was about {Math.round(missBy / 380)}s' walk from
+							your guess.
+						</p>
+						<p class="sub">
+							The solid icon is where they really were at {clock(lesson.t)}. Tracking who you can't
+							see is half of the next decision.
+						</p>
+						<button type="button" class="primary" on:click={() => (track = 'done')}>
+							Next: the decision →
+						</button>
+					{/if}
 				</section>
 			{:else if phase === 'puzzle'}
 				<section>
@@ -545,6 +605,13 @@
 	}
 	.fact-race::before {
 		background: #4ea1ff;
+	}
+	.verdict {
+		font-weight: 600;
+		color: var(--loss);
+	}
+	.verdict.close {
+		color: var(--win);
 	}
 	.question {
 		display: flex;
