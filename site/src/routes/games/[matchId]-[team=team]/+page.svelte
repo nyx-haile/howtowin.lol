@@ -9,6 +9,7 @@
 	import { onboardingStore } from '$lib/lesson/stores/onboardingStore';
 	import { stateAt, eventsBetween, goldDiffSeries, clock, participantById } from '$lib/game/replay';
 	import { factsAt } from '$lib/game/facts';
+	import { visibilityAt } from '$lib/game/vision';
 	import { championName } from '$lib/game/champions';
 	import type { GameEvent } from '$lib/game/types';
 	import type { PageData } from './$types';
@@ -29,7 +30,17 @@
 	$: startT = lesson.t - LEAD_IN_S;
 	$: endT = lesson.t + lesson.playForwardS;
 	$: paused = stateAt(replay, lesson.t);
-	$: facts = factsAt(paused, lesson.team, lesson.targets);
+	$: pausedVis = visibilityAt(replay, lesson.t, lesson.team, paused);
+	$: facts = factsAt(paused, lesson.team, lesson.targets, pausedVis);
+	let showAll = true;
+	// Fog applies while the player is "in the game" (lead-in and puzzle);
+	// after answering, the full board is revealed unless they toggle it back.
+	$: fogged = phase === 'intro' || phase === 'puzzle' || !showAll;
+	$: second = Math.floor(now);
+	$: vis =
+		fogged && phase !== 'intent' && phase !== 'committed'
+			? visibilityAt(replay, second, lesson.team)
+			: null;
 	$: beats = eventsBetween(replay, lesson.t, endT);
 	$: view = stateAt(replay, now);
 	$: marks = replay.events.filter((e) => e.t > startT && e.t <= now && e.type !== 'building');
@@ -175,6 +186,7 @@
 					actualTargetId={phase === 'reveal' ? lesson.actualTargetId : null}
 					targetNotes={notes}
 					{marks}
+					visibility={phase === 'reveal' && showAll ? null : vis}
 					onPick={(id) => (picked = id)}
 				/>
 				{#if phase === 'puzzle'}
@@ -195,6 +207,11 @@
 						on:input={(e) => seek(+e.currentTarget.value)}
 						aria-label="Replay time"
 					/>
+					{#if phase === 'reveal'}
+						<label class="toggle"
+							><input type="checkbox" bind:checked={showAll} /> Show everyone</label
+						>
+					{/if}
 					<select bind:value={speed} aria-label="Playback speed">
 						<option value={4}>4×</option>
 						<option value={8}>8×</option>
@@ -205,7 +222,9 @@
 			<p class="legend">
 				<span class="solid">Solid</span> = recorded by Riot at this moment (every minute mark, every
 				kill). <span class="faded">Faded</span> = in between: movement is a straight-line guess and
-				HP shows the last recorded value.
+				HP shows the last recorded value. Before you answer, enemies only appear when your champions
+				or towers could see them; dashed ghosts mark where they were last seen. Wards aren't
+				recorded, so you may have seen more than this.
 				<b class:live={onMinute}
 					>{onMinute ? 'On a minute mark: everything shown is recorded.' : ''}</b
 				>
@@ -418,6 +437,14 @@
 		color: var(--text-muted);
 		line-height: 1.5;
 	}
+	.toggle {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 0.8rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+	}
 	.legend .solid {
 		color: var(--text);
 		font-weight: 600;
@@ -511,6 +538,10 @@
 	}
 	.fact-objective::before {
 		background: var(--gold);
+	}
+	.fact-fog::before {
+		background: transparent;
+		border: 1px dashed var(--text-muted);
 	}
 	.fact-race::before {
 		background: #4ea1ff;

@@ -3,13 +3,14 @@ import type { MapTarget } from './lesson';
 import type { Side } from './types';
 import { walkSeconds, PITS } from './rift';
 import { championName } from './champions';
+import type { Visibility } from './vision';
 
 /**
  * Coach-style facts about a paused moment, derived only from timeline data.
  * Each fact is something a reviewer would point at on the minimap.
  */
 export interface Fact {
-	kind: 'down' | 'base' | 'objective' | 'race';
+	kind: 'down' | 'base' | 'objective' | 'race' | 'fog';
 	text: string;
 	side?: Side;
 }
@@ -24,13 +25,32 @@ export function inBase(c: ChampionState): boolean {
 	return Math.hypot(c.x - f.x, c.y - f.y) < 2600;
 }
 
-export function factsAt(state: GameState, team: Side, targets: MapTarget[]): Fact[] {
+export function factsAt(
+	state: GameState,
+	team: Side,
+	targets: MapTarget[],
+	visibility?: Map<number, Visibility>
+): Fact[] {
 	const facts: Fact[] = [];
+	const seen = (c: ChampionState) =>
+		!visibility || visibility.get(c.participant.id)?.kind === 'visible';
 	const enemy: Side = team === 'blue' ? 'red' : 'blue';
 
 	for (const side of [enemy, team]) {
 		for (const c of state.champions.filter((c) => c.participant.team === side)) {
 			const name = championName(c.participant.champion);
+			const v = visibility?.get(c.participant.id);
+			if (side === enemy && v && v.kind !== 'visible' && c.deadFor === 0) {
+				facts.push({
+					kind: 'fog',
+					side,
+					text:
+						v.kind === 'last-seen'
+							? `${name}: last seen ${Math.round(v.agoS)}s ago`
+							: `${name}: not seen in the last 2 minutes`
+				});
+				continue;
+			}
 			if (c.deadFor > 0) {
 				facts.push({
 					kind: 'down',
@@ -53,22 +73,22 @@ export function factsAt(state: GameState, team: Side, targets: MapTarget[]): Fac
 	const pits = Object.values(PITS);
 	for (const tg of targets) {
 		if (!pits.some((p) => Math.hypot(p.x - tg.x, p.y - tg.y) < 1500)) continue;
-		const ours = closest(state, team, tg);
-		const theirs = closest(state, enemy, tg);
+		const ours = closest(state, team, tg, seen);
+		const theirs = closest(state, enemy, tg, seen);
 		if (!ours || !theirs) continue;
 		if (Math.min(ours.s, theirs.s) > 30) continue;
 		facts.push({
 			kind: 'race',
-			text: `Closest to ${tg.label}: your ${championName(ours.c.participant.champion)} ≈${Math.round(ours.s)}s, their ${championName(theirs.c.participant.champion)} ≈${Math.round(theirs.s)}s`
+			text: `Closest to ${tg.label}: your ${championName(ours.c.participant.champion)} ≈${Math.round(ours.s)}s, closest visible enemy ${championName(theirs.c.participant.champion)} ≈${Math.round(theirs.s)}s`
 		});
 	}
 	return facts;
 }
 
-function closest(state: GameState, side: Side, tg: MapTarget) {
+function closest(state: GameState, side: Side, tg: MapTarget, seen: (c: ChampionState) => boolean) {
 	let best: { c: ChampionState; s: number } | null = null;
 	for (const c of state.champions) {
-		if (c.participant.team !== side || c.deadFor > 0 || inBase(c)) continue;
+		if (c.participant.team !== side || c.deadFor > 0 || inBase(c) || !seen(c)) continue;
 		const s = walkSeconds(c, tg);
 		if (!best || s < best.s) best = { c, s };
 	}

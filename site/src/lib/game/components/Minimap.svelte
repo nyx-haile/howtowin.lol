@@ -6,6 +6,7 @@
 	import { RIFT_SIZE, PITS } from '../rift';
 	import { championName, initials, portraitUrl } from '../champions';
 	import { clock } from '../replay';
+	import type { Visibility } from '../vision';
 
 	export let replay: GameReplay;
 	export let state: GameState;
@@ -25,6 +26,8 @@
 	}[] = [];
 	/** Events to mark on the map (kills, objectives, towers). */
 	export let marks: GameEvent[] = [];
+	/** Fog of war from `team`'s view; omit to show everyone. */
+	export let visibility: Map<number, Visibility> | null = null;
 	export let onPick: (id: string) => void = () => {};
 
 	const S = RIFT_SIZE;
@@ -179,8 +182,21 @@
 		</g>
 	{/each}
 
-	<!-- champions -->
+	<!-- enemies under fog: ghost at last-seen spot -->
 	{#each state.champions as c (c.participant.id)}
+		{@const v = visibility?.get(c.participant.id)}
+		{#if v && v.kind === 'last-seen'}
+			<g class="ghost" style="--c:{teamColor(c.participant.team)}">
+				<title>{championName(c.participant.champion)} · last seen {Math.round(v.agoS)}s ago</title>
+				<circle cx={v.x} cy={fy(v.y)} r={R} />
+				<text x={v.x} y={fy(v.y) + 150} class="initials">{initials(c.participant.champion)}</text>
+				<text x={v.x} y={fy(v.y) + R + 420} class="ago">{Math.round(v.agoS)}s ago</text>
+			</g>
+		{/if}
+	{/each}
+
+	<!-- champions -->
+	{#each state.champions.filter((c) => !visibility || visibility.get(c.participant.id)?.kind === 'visible') as c (c.participant.id)}
 		{@const side = c.participant.team}
 		{@const cy = fy(c.y)}
 		<g
@@ -356,6 +372,28 @@
 		font-size: 420px;
 		font-weight: 700;
 		fill: #e8e8e8;
+	}
+	.ghost circle {
+		fill: none;
+		stroke: var(--c);
+		stroke-width: 90;
+		stroke-dasharray: 120 140;
+		opacity: 0.7;
+	}
+	.ghost .initials {
+		text-anchor: middle;
+		font-size: 380px;
+		font-weight: 700;
+		fill: var(--c);
+		opacity: 0.7;
+	}
+	.ghost .ago {
+		text-anchor: middle;
+		font-size: 340px;
+		fill: #cfcfcf;
+		paint-order: stroke;
+		stroke: #000;
+		stroke-width: 100;
 	}
 	.champ.approx {
 		opacity: 0.6;
