@@ -19,6 +19,10 @@ export interface FrameParticipant {
 	level: number;
 	gold: number;
 	cs: number;
+	hp: number;
+	hpMax: number;
+	mp: number;
+	mpMax: number;
 }
 
 export interface Frame {
@@ -35,6 +39,8 @@ export type GameEvent =
 			assists: number[];
 			x: number;
 			y: number;
+			/** Damage the victim took in their last seconds, per source and spell. */
+			damage?: { from: number; spell: string; dmg: number }[];
 	  }
 	| {
 			t: number;

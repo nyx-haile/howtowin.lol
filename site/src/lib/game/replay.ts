@@ -8,10 +8,16 @@ export interface ChampionState {
 	level: number;
 	gold: number;
 	cs: number;
+	hp: number;
+	hpMax: number;
+	mp: number;
+	mpMax: number;
 	/** Seconds until respawn, or 0 if alive. */
 	deadFor: number;
-	/** Seconds since this position was observed (positions are sampled per minute). */
-	positionAgeS: number;
+	/** True when position comes from data at (or within 2s of) this moment, false when interpolated. */
+	exact: boolean;
+	/** True when HP/mana are recorded at this moment (minute mark, death, respawn). */
+	vitalsExact: boolean;
 }
 
 export interface GameState {
@@ -41,43 +47,124 @@ export function participantById(replay: GameReplay, id: number): Participant | u
 	return replay.participants.find((p) => p.id === id);
 }
 
+const FOUNTAIN = { blue: { x: 394, y: 461 }, red: { x: 14340, y: 14390 } };
+const EXACT_WINDOW_S = 2;
+
+interface Anchor {
+	t: number;
+	x: number;
+	y: number;
+}
+
 /**
- * Reconstruct what a coach would pause on at time t: where everyone was,
- * who was dead and for how long, towers standing, objective clocks.
- *
- * Positions come from the last per-minute frame, overridden by any kill
- * event (which carries an exact position) involving that champion in the
- * preceding 20 seconds.
+ * Known positions for one champion over the whole game: every minute frame,
+ * every event that carries their position (kills they were part of), and
+ * the fountain when they respawn. Everything between anchors is
+ * interpolated and must be shown as approximate.
+ */
+function anchorsFor(replay: GameReplay, id: number): Anchor[] {
+	const team = participantById(replay, id)!.team;
+	const out: Anchor[] = replay.frames.map((f) => {
+		const p = f.p.find((q) => q.id === id)!;
+		return { t: f.t, x: p.x, y: p.y };
+	});
+	for (const e of replay.events) {
+		if (e.type !== 'kill') continue;
+		if (e.killer === id || e.victim === id || e.assists.includes(id))
+			out.push({ t: e.t, x: e.x, y: e.y });
+		if (e.victim === id) {
+			const lvl = frameAt(replay, e.t).p.find((q) => q.id === id)!.level;
+			const back = e.t + respawnSeconds(lvl, e.t);
+			// Body stays where it fell until respawn, then appears at fountain.
+			out.push({ t: back - 0.01, x: e.x, y: e.y });
+			out.push({ t: back, ...FOUNTAIN[team] });
+		}
+	}
+	return out.sort((a, b) => a.t - b.t);
+}
+
+const anchorCache = new WeakMap<GameReplay, Map<number, Anchor[]>>();
+function cachedAnchors(replay: GameReplay, id: number): Anchor[] {
+	let m = anchorCache.get(replay);
+	if (!m) anchorCache.set(replay, (m = new Map()));
+	let a = m.get(id);
+	if (!a) m.set(id, (a = anchorsFor(replay, id)));
+	return a;
+}
+
+function positionAt(replay: GameReplay, id: number, t: number) {
+	const anchors = cachedAnchors(replay, id);
+	let prev = anchors[0];
+	let next = anchors[anchors.length - 1];
+	for (const a of anchors) {
+		if (a.t <= t) prev = a;
+		if (a.t >= t) {
+			next = a;
+			break;
+		}
+	}
+	const exact = Math.min(Math.abs(t - prev.t), Math.abs(next.t - t)) <= EXACT_WINDOW_S;
+	if (next.t === prev.t) return { x: prev.x, y: prev.y, exact };
+	const k = (t - prev.t) / (next.t - prev.t);
+	return { x: prev.x + (next.x - prev.x) * k, y: prev.y + (next.y - prev.y) * k, exact };
+}
+
+/**
+ * Reconstruct the board at second t: positions (exact at anchors,
+ * interpolated between), HP/mana (exact at minute marks; between marks the
+ * last recorded value, flagged not exact), deaths and respawns, towers,
+ * objective clocks.
  */
 export function stateAt(replay: GameReplay, t: number): GameState {
 	const frame = frameAt(replay, t);
+	const onMark = Math.abs(t - frame.t) <= EXACT_WINDOW_S;
 	const kills = replay.events.filter(
 		(e): e is Extract<GameEvent, { type: 'kill' }> => e.type === 'kill' && e.t <= t
 	);
 
 	const champions = replay.participants.map((participant) => {
 		const fp = frame.p.find((p) => p.id === participant.id)!;
-		let x = fp.x;
-		let y = fp.y;
-		let positionAgeS = t - frame.t;
-		for (const k of kills) {
-			const involved =
-				k.killer === participant.id ||
-				k.victim === participant.id ||
-				k.assists.includes(participant.id);
-			if (involved && t - k.t <= 20 && k.t >= frame.t) {
-				x = k.x;
-				y = k.y;
-				positionAgeS = t - k.t;
-			}
-		}
+		const pos = positionAt(replay, participant.id, t);
 		let deadFor = 0;
 		for (const k of kills) {
 			if (k.victim !== participant.id) continue;
 			const back = k.t + respawnSeconds(fp.level, k.t);
-			if (t >= k.t && t < back) deadFor = back - t;
+			if (t >= k.t && t < back) {
+				deadFor = back - t;
+			}
 		}
-		return { participant, x, y, level: fp.level, gold: fp.gold, cs: fp.cs, deadFor, positionAgeS };
+		const lastDeathBack = kills
+			.filter((k) => k.victim === participant.id)
+			.map((k) => k.t + respawnSeconds(fp.level, k.t))
+			.filter((b) => b <= t && b > frame.t)
+			.at(-1);
+		let hp = fp.hp;
+		let mp = fp.mp;
+		let vitalsExact = onMark;
+		if (deadFor > 0) {
+			hp = 0;
+			vitalsExact = true;
+		} else if (lastDeathBack !== undefined) {
+			// Respawned since the last minute mark: full HP and mana.
+			hp = fp.hpMax;
+			mp = fp.mpMax;
+			vitalsExact = t - lastDeathBack <= EXACT_WINDOW_S;
+		}
+		return {
+			participant,
+			x: pos.x,
+			y: pos.y,
+			level: fp.level,
+			gold: fp.gold,
+			cs: fp.cs,
+			hp,
+			hpMax: fp.hpMax,
+			mp,
+			mpMax: fp.mpMax,
+			deadFor,
+			exact: deadFor > 0 || pos.exact,
+			vitalsExact
+		};
 	});
 
 	const fallen = new Set(

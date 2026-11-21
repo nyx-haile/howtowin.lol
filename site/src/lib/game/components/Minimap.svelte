@@ -182,24 +182,27 @@
 	<!-- champions -->
 	{#each state.champions as c (c.participant.id)}
 		{@const side = c.participant.team}
+		{@const cy = fy(c.y)}
 		<g
 			class="champ"
 			class:dead={c.deadFor > 0}
 			class:ours={side === team}
+			class:approx={!c.exact}
 			style="--c:{teamColor(side)}"
 		>
 			<title>
-				{championName(c.participant.champion)} · level {c.level}{c.deadFor > 0
+				{championName(c.participant.champion)} · level {c.level} · {Math.round(c.hp)}/{c.hpMax} HP{c.deadFor >
+				0
 					? ` · dead, back in ≈${Math.ceil(c.deadFor)}s`
-					: ''}
+					: ''}{c.exact ? '' : ' · position approximate'}
 			</title>
-			<circle cx={c.x} cy={fy(c.y)} r={R} class="ring" />
-			<text x={c.x} y={fy(c.y) + 150} class="initials">{initials(c.participant.champion)}</text>
+			<circle cx={c.x} {cy} r={R} class="ring" />
+			<text x={c.x} y={cy + 150} class="initials">{initials(c.participant.champion)}</text>
 			{#if loaded[c.participant.champion]}
 				<image
 					href={portraitUrl(c.participant.champion, replay.patch)}
 					x={c.x - R}
-					y={fy(c.y) - R}
+					y={cy - R}
 					width={R * 2}
 					height={R * 2}
 					clip-path="url(#clip-{uid}-{c.participant.id})"
@@ -207,7 +210,28 @@
 				/>
 			{/if}
 			{#if c.deadFor > 0}
-				<text x={c.x} y={fy(c.y) + R + 420} class="timer">{Math.ceil(c.deadFor)}s</text>
+				<text x={c.x} y={cy + R + 420} class="timer">{Math.ceil(c.deadFor)}s</text>
+			{:else}
+				<g class="bars" class:stale={!c.vitalsExact}>
+					<rect x={c.x - 650} y={cy - R - 420} width="1300" height="190" class="bar-bg" />
+					<rect
+						x={c.x - 650}
+						y={cy - R - 420}
+						width={1300 * Math.max(0, Math.min(1, c.hp / c.hpMax))}
+						height="190"
+						class="hp"
+					/>
+					{#if c.mpMax > 0}
+						<rect x={c.x - 650} y={cy - R - 215} width="1300" height="100" class="bar-bg" />
+						<rect
+							x={c.x - 650}
+							y={cy - R - 215}
+							width={1300 * Math.max(0, Math.min(1, c.mp / c.mpMax))}
+							height="100"
+							class="mp"
+						/>
+					{/if}
+				</g>
 			{/if}
 		</g>
 	{/each}
@@ -332,6 +356,26 @@
 		font-size: 420px;
 		font-weight: 700;
 		fill: #e8e8e8;
+	}
+	.champ.approx {
+		opacity: 0.6;
+	}
+	.champ.approx .ring {
+		stroke-dasharray: 160 110;
+	}
+	.bar-bg {
+		fill: #0b0f0d;
+		stroke: #0b0f0d;
+		stroke-width: 50;
+	}
+	.hp {
+		fill: var(--c);
+	}
+	.mp {
+		fill: #7dd3fc;
+	}
+	.bars.stale {
+		opacity: 0.45;
 	}
 	.champ.dead {
 		opacity: 0.45;

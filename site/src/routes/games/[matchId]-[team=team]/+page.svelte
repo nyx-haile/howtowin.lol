@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import Minimap from '$lib/game/components/Minimap.svelte';
 	import GoldSwing from '$lib/game/components/GoldSwing.svelte';
 	import InterventionPrompt from '$lib/lesson/components/InterventionPrompt.svelte';
@@ -15,41 +16,90 @@
 	export let data: PageData;
 	$: ({ lesson, replay } = data);
 
-	type Phase = 'pause' | 'reveal' | 'intent' | 'committed';
-	let phase: Phase = 'pause';
+	type Phase = 'intro' | 'puzzle' | 'reveal' | 'intent' | 'committed';
+	const LEAD_IN_S = 60;
+	let phase: Phase = 'intro';
 	let picked: string | null = null;
 	let intent: string | null = null;
-	let cursor = 0; // index into beats; -1 = paused moment
+	let now = data.lesson.t - LEAD_IN_S;
+	let playing = false;
+	let speed = 8; // game seconds per real second
 
 	$: enemy = lesson.team === 'blue' ? 'red' : 'blue';
+	$: startT = lesson.t - LEAD_IN_S;
+	$: endT = lesson.t + lesson.playForwardS;
 	$: paused = stateAt(replay, lesson.t);
 	$: facts = factsAt(paused, lesson.team, lesson.targets);
-	$: beats = eventsBetween(replay, lesson.t, lesson.t + lesson.playForwardS);
-	$: viewT = phase === 'pause' || cursor < 0 ? lesson.t : (beats[cursor]?.t ?? lesson.t);
-	$: view = stateAt(replay, viewT);
-	$: arrows =
-		phase === 'pause'
-			? []
-			: paused.champions
-					.filter((c) => c.participant.team === lesson.team)
-					.map((c) => {
-						const now = view.champions.find((v) => v.participant.id === c.participant.id)!;
-						return { id: c.participant.id, from: c, to: now };
-					});
-	$: marks = phase === 'pause' ? [] : beats.filter((e) => e.t <= viewT);
+	$: beats = eventsBetween(replay, lesson.t, endT);
+	$: view = stateAt(replay, now);
+	$: marks = replay.events.filter((e) => e.t > startT && e.t <= now && e.type !== 'building');
 	$: series = goldDiffSeries(replay, lesson.team);
-	$: endT = lesson.t + lesson.playForwardS;
 	$: kills = (side: string, t: number) =>
 		replay.events.filter(
 			(e) => e.type === 'kill' && e.t <= t && participantById(replay, e.killer)?.team === side
 		).length;
 	$: notes =
-		phase === 'pause' || !lesson.comparison
+		phase === 'intro' || phase === 'puzzle' || !lesson.comparison
 			? {}
 			: Object.fromEntries(
 					lesson.comparison.byTarget.map((b) => [b.targetId, `${b.won} of ${b.games} won`])
 				);
 	$: maxGames = lesson.comparison ? Math.max(...lesson.comparison.byTarget.map((b) => b.games)) : 1;
+	$: onMinute = Math.abs(now - Math.round(now / 60) * 60) <= 2;
+	$: currentBeat = beats.reduce((acc, e, i) => (e.t <= now ? i : acc), -1);
+
+	// Playback: rAF loop advancing `now`; stops at the puzzle moment during the
+	// intro and at the end of the window after the reveal.
+	let raf = 0;
+	let last = 0;
+	function tick(ts: number) {
+		if (!playing) return;
+		const dt = last ? (ts - last) / 1000 : 0;
+		last = ts;
+		const stopAt = phase === 'intro' ? lesson.t : endT;
+		now = Math.min(stopAt, now + dt * speed);
+		if (now >= stopAt) {
+			playing = false;
+			if (phase === 'intro') phase = 'puzzle';
+			return;
+		}
+		raf = requestAnimationFrame(tick);
+	}
+	function play() {
+		if (phase === 'reveal' && now >= endT) now = lesson.t;
+		playing = true;
+		last = 0;
+		raf = requestAnimationFrame(tick);
+	}
+	function pause() {
+		playing = false;
+		cancelAnimationFrame(raf);
+	}
+	function skipToPuzzle() {
+		pause();
+		now = lesson.t;
+		phase = 'puzzle';
+	}
+	function seek(t: number) {
+		pause();
+		now = t;
+	}
+	onMount(() => {
+		play();
+		return pause;
+	});
+
+	function reveal() {
+		phase = 'reveal';
+		now = lesson.t;
+		play();
+	}
+	function commit(text: string) {
+		intent = text;
+		phase = 'committed';
+		streakStore.recordIntervention(text);
+		onboardingStore.recordLessonCompleted();
+	}
 
 	function name(id: number) {
 		const p = participantById(replay, id);
@@ -85,30 +135,6 @@
 		if (e.type === 'objective') return e.team;
 		return e.owner === 'blue' ? 'red' : 'blue';
 	}
-
-	function reveal() {
-		phase = 'reveal';
-		cursor = -1;
-	}
-	let timer: ReturnType<typeof setInterval> | null = null;
-	function play() {
-		stop();
-		cursor = -1;
-		timer = setInterval(() => {
-			if (cursor >= beats.length - 1) return stop();
-			cursor += 1;
-		}, 900);
-	}
-	function stop() {
-		if (timer) clearInterval(timer);
-		timer = null;
-	}
-	function commit(text: string) {
-		intent = text;
-		phase = 'committed';
-		streakStore.recordIntervention(text);
-		onboardingStore.recordLessonCompleted();
-	}
 </script>
 
 <svelte:head>
@@ -121,14 +147,14 @@
 		<div>
 			<a class="back" href="/games">← games</a>
 			<h1>
-				<span class="clock">{clock(viewT)}</span>
+				<span class="clock">{clock(now)}</span>
 				<span class="side side-{lesson.team}">You: {lesson.team} side</span>
 				<span class="result" class:won={replay.winner === lesson.team}>
 					{replay.winner === lesson.team ? 'win' : 'loss'}
 				</span>
 			</h1>
 			<p class="score">
-				Kills {kills(lesson.team, viewT)}–{kills(enemy, viewT)} ·
+				Kills {kills(lesson.team, now)}–{kills(enemy, now)} ·
 				{view.goldDiff[lesson.team] >= 0 ? 'up' : 'down'}
 				{Math.abs(Math.round(view.goldDiff[lesson.team] / 10) * 10).toLocaleString()} gold
 			</p>
@@ -138,44 +164,67 @@
 
 	<div class="grid">
 		<div class="map-col">
-			<Minimap
-				{replay}
-				state={view}
-				team={lesson.team}
-				targets={lesson.targets}
-				pickable={phase === 'pause'}
-				{picked}
-				actualTargetId={phase === 'pause' ? null : lesson.actualTargetId}
-				targetNotes={notes}
-				{arrows}
-				{marks}
-				onPick={(id) => (picked = id)}
-			/>
-			{#if phase !== 'pause'}
+			<div class="map-wrap">
+				<Minimap
+					{replay}
+					state={view}
+					team={lesson.team}
+					targets={phase === 'intro' ? [] : lesson.targets}
+					pickable={phase === 'puzzle'}
+					{picked}
+					actualTargetId={phase === 'reveal' ? lesson.actualTargetId : null}
+					targetNotes={notes}
+					{marks}
+					onPick={(id) => (picked = id)}
+				/>
+				{#if phase === 'puzzle'}
+					<div class="stamp">Paused · {clock(lesson.t)}</div>
+				{/if}
+			</div>
+			{#if phase !== 'puzzle'}
 				<div class="scrub">
-					<button type="button" class="ghost" on:click={timer ? stop : play}>
-						{timer ? 'Pause' : '▶ Play it forward'}
+					<button type="button" class="ghost" on:click={playing ? pause : play}>
+						{playing ? 'Pause' : '▶ Play'}
 					</button>
 					<input
 						type="range"
-						min="-1"
-						max={beats.length - 1}
-						bind:value={cursor}
-						on:input={stop}
-						aria-label="Step through what happened"
+						min={phase === 'intro' ? startT : lesson.t}
+						max={phase === 'intro' ? lesson.t : endT}
+						step="1"
+						value={now}
+						on:input={(e) => seek(+e.currentTarget.value)}
+						aria-label="Replay time"
 					/>
+					<select bind:value={speed} aria-label="Playback speed">
+						<option value={4}>4×</option>
+						<option value={8}>8×</option>
+						<option value={16}>16×</option>
+					</select>
 				</div>
 			{/if}
-			<p class="caveat">
-				Positions come from Riot's match timeline, sampled once a minute and pinned to exact spots
-				at kills. Timers are approximate.
+			<p class="legend">
+				<span class="solid">Solid</span> = recorded by Riot at this moment (every minute mark, every
+				kill). <span class="faded">Faded</span> = in between: movement is a straight-line guess and
+				HP shows the last recorded value.
+				<b class:live={onMinute}
+					>{onMinute ? 'On a minute mark: everything shown is recorded.' : ''}</b
+				>
 			</p>
 		</div>
 
 		<aside class="panel">
-			{#if phase === 'pause'}
+			{#if phase === 'intro'}
 				<section>
-					<h2>Paused at {clock(lesson.t)}</h2>
+					<h2>Watch the minute before</h2>
+					<p>
+						The replay plays {clock(startT)} to {clock(lesson.t)}, then stops at the moment that
+						mattered and asks what you'd do.
+					</p>
+					<button type="button" class="link" on:click={skipToPuzzle}>Skip to the puzzle →</button>
+				</section>
+			{:else if phase === 'puzzle'}
+				<section>
+					<h2>The board at {clock(lesson.t)}</h2>
 					<ul class="facts">
 						{#each facts as f}
 							<li class="fact fact-{f.kind}" class:theirs={f.side && f.side !== lesson.team}>
@@ -198,7 +247,7 @@
 						{/each}
 					</div>
 					<button type="button" class="primary" disabled={!picked} on:click={reveal}>
-						Show what happened
+						Lock it in and play on
 					</button>
 				</section>
 			{:else if phase === 'reveal'}
@@ -214,12 +263,9 @@
 								<button
 									type="button"
 									class="beat"
-									class:on={i === cursor}
-									class:past={i < cursor}
-									on:click={() => {
-										stop();
-										cursor = i;
-									}}
+									class:on={i === currentBeat}
+									class:past={i < currentBeat}
+									on:click={() => seek(e.t)}
 								>
 									<span class="t">{clock(e.t)}</span>
 									<span class="dot dot-{beatSide(e)}"></span>
@@ -349,9 +395,60 @@
 		flex-direction: column;
 		gap: 10px;
 	}
-	.caveat {
-		font-size: 0.72rem;
+	.map-wrap {
+		position: relative;
+	}
+	.stamp {
+		position: absolute;
+		top: 12px;
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(0, 0, 0, 0.7);
+		border: 1px solid var(--gold);
+		color: var(--gold);
+		font-size: 0.8rem;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		padding: 4px 12px;
+		border-radius: 999px;
+	}
+	.legend {
+		font-size: 0.75rem;
 		color: var(--text-muted);
+		line-height: 1.5;
+	}
+	.legend .solid {
+		color: var(--text);
+		font-weight: 600;
+	}
+	.legend .faded {
+		opacity: 0.6;
+		font-weight: 600;
+	}
+	.legend b {
+		display: block;
+		color: var(--win);
+		font-weight: 500;
+		min-height: 1.5em;
+	}
+	select {
+		background: var(--bg-surface);
+		color: var(--text);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 5px 6px;
+		font: inherit;
+		font-size: 0.85rem;
+	}
+	.link {
+		background: none;
+		border: none;
+		color: var(--accent);
+		font: inherit;
+		cursor: pointer;
+		padding: 0;
+		margin-top: 8px;
 	}
 	.scrub {
 		display: flex;
