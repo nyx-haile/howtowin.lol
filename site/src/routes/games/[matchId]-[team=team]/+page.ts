@@ -1,11 +1,10 @@
 import { error } from '@sveltejs/kit';
-import { getSampleLesson } from '$lib/lesson/samples';
-import type { Team } from '$lib/lesson/schema';
+import { getLesson, sampleReplays } from '$lib/game/samples';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = ({ params }) => {
-	const team = params.team as Team;
-	const lesson = getSampleLesson(params.matchId, team);
-	if (!lesson) throw error(404, `No sample lesson for ${params.matchId} (${team} side)`);
-	return { matchId: params.matchId, team, lesson };
+	const lesson = getLesson(params.matchId, params.team);
+	const replay = sampleReplays[params.matchId];
+	if (!lesson || !replay) throw error(404, `No lesson for ${params.matchId} (${params.team} side)`);
+	return { lesson, replay };
 };

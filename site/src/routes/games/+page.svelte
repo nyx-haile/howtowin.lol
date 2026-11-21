@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { sampleGames } from '$lib/lesson/samples';
+	import { sampleLessons, sampleReplays } from '$lib/game/samples';
+	import { clock } from '$lib/game/replay';
+	import { championName } from '$lib/game/champions';
 </script>
 
 <svelte:head>
@@ -9,23 +11,26 @@
 
 <section class="games">
 	<h2>Review a game</h2>
-	<p class="sub">
-		Each lesson finds the mid-game minute where games like yours split between wins and losses.
-		These are sample games while the model is built separately.
-	</p>
-
+	<p class="sub">Each review pauses your game at one moment and asks what you'd do from there.</p>
 	<ul>
-		{#each sampleGames as g (g.matchId + g.team)}
+		{#each sampleLessons as l (l.matchId + l.team)}
+			{@const r = sampleReplays[l.matchId]}
 			<li>
-				<a href="/games/{g.matchId}-{g.team}">
+				<a href="/games/{l.matchId}-{l.team}">
 					<span class="row">
-						<span class="mono">{g.matchId}</span>
-						<span class="side side-{g.team}">{g.team} side</span>
-						<span class="result" class:won={g.lesson.player_won}>
-							{g.lesson.player_won ? 'win' : 'loss'}
+						<span class="t">{clock(l.t)}</span>
+						<span class="side side-{l.team}">{l.team} side</span>
+						<span class="result" class:won={r.winner === l.team}>
+							{r.winner === l.team ? 'win' : 'loss'}
 						</span>
 					</span>
-					<span class="summary">{g.summary}</span>
+					<span class="champs">
+						{r.participants
+							.filter((p) => p.team === l.team)
+							.map((p) => championName(p.champion))
+							.join(' · ')}
+					</span>
+					<span class="q">{l.question}</span>
 				</a>
 			</li>
 		{/each}
@@ -44,13 +49,9 @@
 	}
 	.sub {
 		color: var(--text-muted);
-		line-height: 1.6;
 	}
 	ul {
 		list-style: none;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
 	}
 	a {
 		display: flex;
@@ -59,7 +60,7 @@
 		padding: 14px 16px;
 		background: var(--bg-surface);
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: 8px;
 		color: var(--text);
 	}
 	a:hover {
@@ -68,16 +69,17 @@
 	}
 	.row {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
 		gap: 10px;
+		align-items: baseline;
 	}
-	.mono {
+	.t {
 		font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+		font-size: 1.2rem;
+		font-weight: 600;
 	}
 	.side,
 	.result {
-		font-size: 0.7rem;
+		font-size: 0.68rem;
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 		padding: 2px 8px;
@@ -85,10 +87,10 @@
 		border: 1px solid var(--border);
 	}
 	.side-blue {
-		color: #60a5fa;
+		color: #4ea1ff;
 	}
 	.side-red {
-		color: #f87171;
+		color: #ff5a5f;
 	}
 	.result {
 		color: var(--loss);
@@ -96,9 +98,11 @@
 	.result.won {
 		color: var(--win);
 	}
-	.summary {
+	.champs {
 		font-size: 0.85rem;
 		color: var(--text-muted);
-		line-height: 1.5;
+	}
+	.q {
+		font-size: 0.95rem;
 	}
 </style>
