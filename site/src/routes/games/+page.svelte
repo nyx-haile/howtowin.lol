@@ -1,15 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
-
-	let matchId = '';
-	let team: 'blue' | 'red' = 'blue';
-
-	$: cleaned = matchId.trim().toUpperCase();
-	$: valid = /^[A-Z0-9]{2,6}_\d{6,14}$/.test(cleaned);
-
-	function submit() {
-		if (valid) goto(`/games/${cleaned}-${team}`);
-	}
+	import { sampleGames } from '$lib/lesson/samples';
 </script>
 
 <svelte:head>
@@ -17,36 +7,34 @@
 	<meta name="robots" content="noindex" />
 </svelte:head>
 
-<form class="lookup" on:submit|preventDefault={submit}>
+<section class="games">
 	<h2>Review a game</h2>
 	<p class="sub">
-		Pick a match and the side you played. We'll find the minute where similar games split between
-		wins and losses.
+		Each lesson finds the mid-game minute where games like yours split between wins and losses.
+		These are sample games while the model is built separately.
 	</p>
 
-	<label>
-		<span>Match id</span>
-		<input
-			name="matchId"
-			placeholder="NA1_5439588777"
-			autocomplete="off"
-			spellcheck="false"
-			bind:value={matchId}
-		/>
-	</label>
-
-	<fieldset>
-		<legend>Your side</legend>
-		<label class="radio"><input type="radio" bind:group={team} value="blue" /> Blue</label>
-		<label class="radio"><input type="radio" bind:group={team} value="red" /> Red</label>
-	</fieldset>
-
-	<button type="submit" disabled={!valid}>Find the moment →</button>
-</form>
+	<ul>
+		{#each sampleGames as g (g.matchId + g.team)}
+			<li>
+				<a href="/games/{g.matchId}-{g.team}">
+					<span class="row">
+						<span class="mono">{g.matchId}</span>
+						<span class="side side-{g.team}">{g.team} side</span>
+						<span class="result" class:won={g.lesson.player_won}>
+							{g.lesson.player_won ? 'win' : 'loss'}
+						</span>
+					</span>
+					<span class="summary">{g.summary}</span>
+				</a>
+			</li>
+		{/each}
+	</ul>
+</section>
 
 <style>
-	.lookup {
-		max-width: 480px;
+	.games {
+		max-width: 680px;
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
@@ -58,59 +46,59 @@
 		color: var(--text-muted);
 		line-height: 1.6;
 	}
-	label {
+	ul {
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	a {
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		font-size: 0.9rem;
-		color: var(--text-muted);
-	}
-	input[name='matchId'] {
+		padding: 14px 16px;
 		background: var(--bg-surface);
-		color: var(--text);
 		border: 1px solid var(--border);
 		border-radius: 6px;
-		padding: 10px 12px;
-		font: inherit;
+		color: var(--text);
+	}
+	a:hover {
+		border-color: var(--accent);
+		color: var(--text);
+	}
+	.row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 10px;
+	}
+	.mono {
 		font-family: ui-monospace, 'SF Mono', Menlo, monospace;
 	}
-	input[name='matchId']:focus {
-		outline: none;
-		border-color: var(--accent);
+	.side,
+	.result {
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		padding: 2px 8px;
+		border-radius: 999px;
+		border: 1px solid var(--border);
 	}
-	fieldset {
-		border: none;
-		display: flex;
-		gap: 16px;
-		align-items: center;
-		font-size: 0.9rem;
+	.side-blue {
+		color: #60a5fa;
+	}
+	.side-red {
+		color: #f87171;
+	}
+	.result {
+		color: var(--loss);
+	}
+	.result.won {
+		color: var(--win);
+	}
+	.summary {
+		font-size: 0.85rem;
 		color: var(--text-muted);
-	}
-	legend {
-		margin-bottom: 6px;
-	}
-	.radio {
-		flex-direction: row;
-		align-items: center;
-		gap: 6px;
-		color: var(--text);
-		cursor: pointer;
-	}
-	button {
-		align-self: flex-start;
-		background: var(--accent);
-		color: white;
-		border: none;
-		border-radius: 6px;
-		padding: 10px 16px;
-		cursor: pointer;
-		font: inherit;
-	}
-	button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	button:not(:disabled):hover {
-		background: var(--accent-dim);
+		line-height: 1.5;
 	}
 </style>
