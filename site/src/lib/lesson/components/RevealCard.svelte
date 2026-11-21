@@ -6,6 +6,9 @@
 	export let userChoice: PretestChoice | null;
 	export let cohortProse: string | null;
 	export let onContinue: () => void;
+
+	$: timestamp = `${anchor.minute.toString().padStart(2, '0')}:00`;
+	$: wins = Math.round(anchor.cohort_winrate * anchor.cohort_size);
 </script>
 
 <section class="reveal">
@@ -22,10 +25,14 @@
 		{#if cohortProse}
 			<p>{cohortProse}</p>
 		{:else}
+			<p>
+				From where your team stood at {timestamp}, {wins} of {anchor.cohort_size} similar games
+				ended in a win{#if anchor.polarity === 'mistake'}. Yours didn't.{:else}, and yours was one of
+					them.{/if}
+			</p>
 			<p class="fallback">
-				The decision-diff pipeline will fill in what separated cohort winners from losers here.
-				For now: cohort entropy {Math.round(anchor.cohort_entropy * 100)}% — this was a pivotal
-				minute.
+				We can find this moment, but we can't yet say what separated the games that won from
+				the ones that didn't.
 			</p>
 		{/if}
 	</div>

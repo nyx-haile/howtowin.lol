@@ -8,6 +8,18 @@ import { confidenceFromEntropy, hedge } from '$lib/lesson/epistemic';
 import type { FixtureExtras } from '$lib/lesson/fixtures';
 
 /**
+ * Extras for a lesson that comes straight from the model with nothing
+ * authored on top. Until the decision-diff pipeline (bead 9b01bf83-8hi)
+ * lands, this is what every live lesson gets: no pretest, no cohort prose,
+ * no suggested intents. LessonStage skips the pretest when choices are empty.
+ */
+export const MODEL_ONLY_EXTRAS: FixtureExtras = {
+	cohortProse: null,
+	pretestChoices: [],
+	interventionSuggestions: [],
+};
+
+/**
  * Build the presentation view-model from a raw LessonResult plus the
  * non-Python presentation extras (pretest choices, cohort prose, intervention
  * suggestions).
