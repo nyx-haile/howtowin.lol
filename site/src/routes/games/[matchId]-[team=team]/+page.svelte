@@ -32,7 +32,7 @@
 	$: endT = lesson.t + lesson.playForwardS;
 	$: paused = stateAt(replay, lesson.t);
 	$: pausedVis = visibilityAt(replay, lesson.t, lesson.team, paused);
-	$: facts = factsAt(paused, lesson.team, lesson.targets, pausedVis);
+	$: facts = factsAt(paused, lesson.team, lesson.targets, drill ? pausedVis : undefined);
 	let showAll = true;
 
 	// "Where is X?" step: before the decision, ask the player to place the
@@ -61,7 +61,9 @@
 	}
 	// Fog applies while the player is "in the game" (lead-in and puzzle);
 	// after answering, the full board is revealed unless they toggle it back.
-	$: fogged = phase === 'intro' || phase === 'puzzle' || !showAll;
+	// Core puzzles show the full board (estimated fog would decide answers on a guess);
+	// only the find-the-hidden-enemy drill uses the vision estimate.
+	$: fogged = drill && (phase === 'intro' || phase === 'puzzle' || !showAll);
 	$: second = Math.floor(now);
 	$: baseVis =
 		fogged && phase !== 'intent' && phase !== 'committed'
@@ -239,7 +241,7 @@
 						on:input={(e) => seek(+e.currentTarget.value)}
 						aria-label="Replay time"
 					/>
-					{#if phase === 'reveal'}
+					{#if drill && phase === 'reveal'}
 						<label class="toggle"
 							><input type="checkbox" bind:checked={showAll} /> Show everyone</label
 						>
@@ -254,9 +256,14 @@
 			<p class="legend">
 				<span class="solid">Solid</span> = recorded by Riot at this moment (every minute mark, every
 				kill). <span class="faded">Faded</span> = in between: movement is a straight-line guess and
-				HP shows the last recorded value. Before you answer, enemies only appear when your champions
-				or towers could see them; dashed ghosts mark where they were last seen. Wards aren't
-				recorded, so you may have seen more than this.
+				HP shows the last recorded value.
+				{#if drill}
+					Enemies only appear where your champions or towers could likely see them; dashed ghosts
+					mark where they were last seen. This is an estimate, since wards aren't recorded.
+				{:else}
+					Like a chess puzzle, you see the whole board, including enemies your team may not have
+					seen.
+				{/if}
 				<b class:live={onMinute}
 					>{onMinute ? 'On a minute mark: everything shown is recorded.' : ''}</b
 				>

@@ -79,7 +79,7 @@ export function factsAt(
 		if (Math.min(ours.s, theirs.s) > 30) continue;
 		facts.push({
 			kind: 'race',
-			text: `Closest to ${tg.label}: your ${championName(ours.c.participant.champion)} ≈${Math.round(ours.s)}s, closest visible enemy ${championName(theirs.c.participant.champion)} ≈${Math.round(theirs.s)}s`
+			text: `Closest to ${tg.label}: your ${championName(ours.c.participant.champion)} ≈${Math.round(ours.s)}s, closest ${visibility ? 'visible ' : ''}enemy ${championName(theirs.c.participant.champion)} ≈${Math.round(theirs.s)}s`
 		});
 	}
 	return facts;
