@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import Minimap from '$lib/game/components/Minimap.svelte';
 	import GoldSwing from '$lib/game/components/GoldSwing.svelte';
 	import InterventionPrompt from '$lib/lesson/components/InterventionPrompt.svelte';
@@ -36,7 +37,7 @@
 
 	// "Where is X?" step: before the decision, ask the player to place the
 	// enemy they couldn't see (jungler first, else the longest-unseen one).
-	type Track = 'ask' | 'answered' | 'done';
+	type Track = 'ask' | 'answered';
 	$: unseenTarget = (() => {
 		const hidden = replay.participants.filter(
 			(p) => p.team !== lesson.team && pausedVis.get(p.id)?.kind !== 'visible'
@@ -45,7 +46,9 @@
 	})();
 	let track: Track = 'ask';
 	let guess: { x: number; y: number } | null = null;
-	$: trackActive = phase === 'puzzle' && unseenTarget !== null && track !== 'done';
+	// A separate, lighter drill (?drill=find-enemy): not a gate before the main puzzle.
+	$: drill = $page.url.searchParams.get('drill') === 'find-enemy';
+	$: trackActive = drill && phase === 'puzzle' && unseenTarget !== null;
 	$: actual = unseenTarget
 		? (paused.champions.find((c) => c.participant.id === unseenTarget.id) ?? null)
 		: null;
@@ -65,7 +68,7 @@
 			? visibilityAt(replay, second, lesson.team)
 			: null;
 	$: vis =
-		baseVis && unseenTarget && phase === 'puzzle' && track !== 'ask'
+		baseVis && unseenTarget && trackActive && track !== 'ask'
 			? new Map([...baseVis, [unseenTarget.id, { kind: 'visible' as const }]])
 			: baseVis;
 	$: beats = eventsBetween(replay, lesson.t, endT);
@@ -210,7 +213,7 @@
 					targets={phase === 'intro' || trackActive ? [] : lesson.targets}
 					pickable={phase === 'puzzle' && !trackActive}
 					onMapClick={trackActive && track === 'ask' ? placeGuess : null}
-					guess={phase === 'puzzle' && track !== 'done' ? guess : null}
+					guess={trackActive ? guess : null}
 					{picked}
 					actualTargetId={phase === 'reveal' ? lesson.actualTargetId : null}
 					targetNotes={notes}
@@ -272,7 +275,7 @@
 				</section>
 			{:else if trackActive && unseenTarget}
 				<section class="question">
-					<h2>Before you decide</h2>
+					<h2>Drill: find the hidden enemy</h2>
 					<p class="q">
 						{championName(unseenTarget.champion)}
 						{unseenInfo?.kind === 'last-seen'
@@ -293,12 +296,12 @@
 							your guess.
 						</p>
 						<p class="sub">
-							The solid icon is where they really were at {clock(lesson.t)}. Tracking who you can't
-							see is half of the next decision.
+							The solid icon is where they really were at {clock(lesson.t)}.
 						</p>
-						<button type="button" class="primary" on:click={() => (track = 'done')}>
-							Next: the decision →
+						<button type="button" class="primary" on:click={reveal}>
+							Watch the next {lesson.playForwardS}s →
 						</button>
+						<a class="link" href="/games/{lesson.matchId}-{lesson.team}">Try the main puzzle →</a>
 					{/if}
 				</section>
 			{:else if phase === 'puzzle'}

@@ -32,6 +32,9 @@
 					</span>
 					<span class="q">{l.question}</span>
 				</a>
+				<a class="drill" href="/games/{l.matchId}-{l.team}?drill=find-enemy"
+					>Drill: find the hidden enemy at {clock(l.t)} →</a
+				>
 			</li>
 		{/each}
 	</ul>
@@ -104,5 +107,11 @@
 	}
 	.q {
 		font-size: 0.95rem;
+	}
+	.drill {
+		display: inline-block;
+		margin-top: 0.35rem;
+		font-size: 0.85rem;
+		color: var(--text-muted, #9aa0a6);
 	}
 </style>
